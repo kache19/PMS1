@@ -1,0 +1,223 @@
+[17-Dec-2025 07:55:49 UTC] Router - Original URI: /api/products
+[17-Dec-2025 07:55:49 UTC] Router - Processed path: /products
+[17-Dec-2025 07:55:49 UTC] Router - Method: GET
+[17-Dec-2025 07:55:49 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /login -> /login against path: /products
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /health -> /health against path: /products
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /debug -> /debug against path: /products
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /products
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /products -> /products against path: /products
+[17-Dec-2025 07:55:49 UTC] Router - MATCH FOUND: /products -> routes/products.php
+[17-Dec-2025 07:55:49 UTC] Router - Original URI: /api/branches
+[17-Dec-2025 07:55:49 UTC] Router - Processed path: /branches
+[17-Dec-2025 07:55:49 UTC] Router - Method: GET
+[17-Dec-2025 07:55:49 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /login -> /login against path: /branches
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /health -> /health against path: /branches
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /debug -> /debug against path: /branches
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /branches
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /products -> /products against path: /branches
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /products/{id} -> /products/([^/]+) against path: /branches
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /staff -> /staff against path: /branches
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /staff/{id} -> /staff/([^/]+) against path: /branches
+[17-Dec-2025 07:55:49 UTC] Router - Checking pattern: /branches -> /branches against path: /branches
+[17-Dec-2025 07:55:49 UTC] Router - MATCH FOUND: /branches -> routes/branches.php
+[17-Dec-2025 07:55:50 UTC] Router - Original URI: /api/products
+[17-Dec-2025 07:55:50 UTC] Router - Processed path: /products
+[17-Dec-2025 07:55:50 UTC] Router - Method: GET
+[17-Dec-2025 07:55:50 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /login -> /login against path: /products
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /health -> /health against path: /products
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /debug -> /debug against path: /products
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /products
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products -> /products against path: /products
+[17-Dec-2025 07:55:50 UTC] Router - MATCH FOUND: /products -> routes/products.php
+[17-Dec-2025 07:55:50 UTC] Router - Original URI: /api/disposals
+[17-Dec-2025 07:55:50 UTC] Router - Processed path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Method: GET
+[17-Dec-2025 07:55:50 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /login -> /login against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /health -> /health against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /debug -> /debug against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products -> /products against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products/{id} -> /products/([^/]+) against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff -> /staff against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff/{id} -> /staff/([^/]+) against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches -> /branches against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id} -> /branches/([^/]+) against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/staff -> /branches/([^/]+)/staff against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/inventory-summary -> /branches/([^/]+)/inventory-summary against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/sales-summary -> /branches/([^/]+)/sales-summary against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Original URI: /api/finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory -> /inventory against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory/{id} -> /inventory/([^/]+) against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Processed path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /stock -> /stock against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Method: GET
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /stock/{id} -> /stock/([^/]+) against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /login -> /login against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory/transfers -> /inventory/transfers against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales -> /sales against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/history -> /sales/history against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/{id} -> /sales/([^/]+) against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/summary/dashboard -> /sales/summary/dashboard against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /health -> /health against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /expenses -> /expenses against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /debug -> /debug against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /expenses/{id} -> /expenses/([^/]+) against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /patients -> /patients against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /patients/{id} -> /patients/([^/]+) against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products -> /products against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /settings -> /settings against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products/{id} -> /products/([^/]+) against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /finance/invoices -> /finance/invoices against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff -> /staff against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /finance/invoices/{id}/html -> /finance/invoices/([^/]+)/html against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff/{id} -> /staff/([^/]+) against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /finance/invoices/{id}/pdf -> /finance/invoices/([^/]+)/pdf against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /finance/expenses -> /finance/expenses against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches -> /branches against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /finance/payments/{id} -> /finance/payments/([^/]+) against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id} -> /branches/([^/]+) against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /finance/summary -> /finance/summary against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/staff -> /branches/([^/]+)/staff against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /disposals -> /disposals against path: /disposals
+[17-Dec-2025 07:55:50 UTC] Router - MATCH FOUND: /disposals -> routes/disposals.php
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/inventory-summary -> /branches/([^/]+)/inventory-summary against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/sales-summary -> /branches/([^/]+)/sales-summary against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory -> /inventory against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory/{id} -> /inventory/([^/]+) against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /stock -> /stock against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /stock/{id} -> /stock/([^/]+) against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory/transfers -> /inventory/transfers against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales -> /sales against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/history -> /sales/history against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/{id} -> /sales/([^/]+) against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/summary/dashboard -> /sales/summary/dashboard against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /expenses -> /expenses against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /expenses/{id} -> /expenses/([^/]+) against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /patients -> /patients against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /patients/{id} -> /patients/([^/]+) against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /settings -> /settings against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /finance/invoices -> /finance/invoices against path: /finance/invoices
+[17-Dec-2025 07:55:50 UTC] Router - MATCH FOUND: /finance/invoices -> routes/finance.php
+[17-Dec-2025 07:55:50 UTC] Router - Original URI: /api/staff
+[17-Dec-2025 07:55:50 UTC] Router - Processed path: /staff
+[17-Dec-2025 07:55:50 UTC] Router - Method: GET
+[17-Dec-2025 07:55:50 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /login -> /login against path: /staff
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /health -> /health against path: /staff
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /debug -> /debug against path: /staff
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /staff
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products -> /products against path: /staff
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products/{id} -> /products/([^/]+) against path: /staff
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff -> /staff against path: /staff
+[17-Dec-2025 07:55:50 UTC] Router - MATCH FOUND: /staff -> routes/staff.php
+[17-Dec-2025 07:55:50 UTC] Router - Original URI: /api/settings
+[17-Dec-2025 07:55:50 UTC] Router - Processed path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Method: GET
+[17-Dec-2025 07:55:50 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /login -> /login against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Original URI: /api/inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /health -> /health against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Processed path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /debug -> /debug against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Method: GET
+[17-Dec-2025 07:55:50 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /login -> /login against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products -> /products against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products/{id} -> /products/([^/]+) against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff -> /staff against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff/{id} -> /staff/([^/]+) against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /health -> /health against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches -> /branches against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /debug -> /debug against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id} -> /branches/([^/]+) against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/staff -> /branches/([^/]+)/staff against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products -> /products against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/inventory-summary -> /branches/([^/]+)/inventory-summary against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products/{id} -> /products/([^/]+) against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/sales-summary -> /branches/([^/]+)/sales-summary against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff -> /staff against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff/{id} -> /staff/([^/]+) against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory -> /inventory against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory/{id} -> /inventory/([^/]+) against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches -> /branches against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id} -> /branches/([^/]+) against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /stock -> /stock against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/staff -> /branches/([^/]+)/staff against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /stock/{id} -> /stock/([^/]+) against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/inventory-summary -> /branches/([^/]+)/inventory-summary against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory/transfers -> /inventory/transfers against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/sales-summary -> /branches/([^/]+)/sales-summary against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales -> /sales against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory -> /inventory against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory/{id} -> /inventory/([^/]+) against path: /inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/history -> /sales/history against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - MATCH FOUND: /inventory/{id} -> routes/inventory.php
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/{id} -> /sales/([^/]+) against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/summary/dashboard -> /sales/summary/dashboard against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /expenses -> /expenses against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /expenses/{id} -> /expenses/([^/]+) against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /patients -> /patients against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /patients/{id} -> /patients/([^/]+) against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /settings -> /settings against path: /settings
+[17-Dec-2025 07:55:50 UTC] Router - MATCH FOUND: /settings -> routes/settings.php
+[17-Dec-2025 07:55:50 UTC] Inventory route - method: GET, id: transfers, id2: , subpath: , action: transfers, branchId: transfers, productId: , URI: /api/inventory/transfers
+[17-Dec-2025 07:55:50 UTC] Router - Original URI: /api/expenses
+[17-Dec-2025 07:55:50 UTC] Router - Processed path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Method: GET
+[17-Dec-2025 07:55:50 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /login -> /login against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /health -> /health against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /debug -> /debug against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products -> /products against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products/{id} -> /products/([^/]+) against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff -> /staff against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff/{id} -> /staff/([^/]+) against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches -> /branches against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id} -> /branches/([^/]+) against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/staff -> /branches/([^/]+)/staff against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/inventory-summary -> /branches/([^/]+)/inventory-summary against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches/{id}/sales-summary -> /branches/([^/]+)/sales-summary against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory -> /inventory against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory/{id} -> /inventory/([^/]+) against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /stock -> /stock against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /stock/{id} -> /stock/([^/]+) against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /inventory/transfers -> /inventory/transfers against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales -> /sales against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/history -> /sales/history against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/{id} -> /sales/([^/]+) against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /sales/summary/dashboard -> /sales/summary/dashboard against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /expenses -> /expenses against path: /expenses
+[17-Dec-2025 07:55:50 UTC] Router - MATCH FOUND: /expenses -> routes/expenses.php
+[17-Dec-2025 07:55:50 UTC] Router - Original URI: /api/branches
+[17-Dec-2025 07:55:50 UTC] Router - Processed path: /branches
+[17-Dec-2025 07:55:50 UTC] Router - Method: GET
+[17-Dec-2025 07:55:50 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /login -> /login against path: /branches
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /health -> /health against path: /branches
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /debug -> /debug against path: /branches
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /branches
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products -> /products against path: /branches
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products/{id} -> /products/([^/]+) against path: /branches
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff -> /staff against path: /branches
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /staff/{id} -> /staff/([^/]+) against path: /branches
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /branches -> /branches against path: /branches
+[17-Dec-2025 07:55:50 UTC] Router - MATCH FOUND: /branches -> routes/branches.php
+[17-Dec-2025 07:55:50 UTC] Router - Original URI: /api/products
+[17-Dec-2025 07:55:50 UTC] Router - Processed path: /products
+[17-Dec-2025 07:55:50 UTC] Router - Method: GET
+[17-Dec-2025 07:55:50 UTC] Router - Looking for route match...
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /login -> /login against path: /products
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /health -> /health against path: /products
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /debug -> /debug against path: /products
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /auth/me -> /auth/me against path: /products
+[17-Dec-2025 07:55:50 UTC] Router - Checking pattern: /products -> /products against path: /products
+[17-Dec-2025 07:55:50 UTC] Router - MATCH FOUND: /products -> routes/products.php
