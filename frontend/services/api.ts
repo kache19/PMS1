@@ -15,7 +15,7 @@ import {
   PaymentMethod
 } from '../types';
 
-export const API_URL = 'http://localhost/backend_php/index.php/api/';
+export const API_URL = 'https://malenyapharmacy.com/backend_php/index.php/api/';
 const REQUEST_TIMEOUT = 30000; // 30 seconds
 
 /**
