@@ -40,7 +40,8 @@ try {
         'phone' => $user['phone'],
         'status' => $user['status'],
         'username' => $user['username'],
-        'joinedDate' => $user['created_at']
+        'joinedDate' => $user['created_at'],
+        'lastLogin' => $user['last_login']
     ];
 
     echo json_encode(['token' => $token, 'user' => $staffData]);

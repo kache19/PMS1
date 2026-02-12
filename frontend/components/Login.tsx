@@ -103,16 +103,16 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
         <div className="absolute -bottom-1/2 -right-1/4 w-[1000px] h-[1000px] bg-blue-900/20 rounded-full blur-3xl"></div>
       </div>
 
-      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[500px] flex overflow-hidden z-10">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-full sm:max-w-md md:max-w-2xl max-h-[90vh] md:max-h-[500px] flex flex-col md:flex-row overflow-hidden z-10 m-4">
 
         {/* Left Side - Hero / Branding */}
-        <div className="hidden md:flex w-1/2 bg-gradient-to-br from-teal-800 to-slate-900 p-6 flex-col justify-between text-white relative">
+        <div className="hidden md:flex md:w-1/2 bg-gradient-to-br from-teal-800 to-slate-900 p-4 lg:p-6 flex-col justify-between text-white relative">
           <div className="relative z-10">
-            <div className="inline-flex items-center gap-3 mb-6">
-              <div className="p-3 bg-teal-500/20 rounded-xl backdrop-blur-sm border border-teal-500/30">
-                <Shield size={32} className="text-teal-400" />
+            <div className="inline-flex items-center gap-2 md:gap-3 mb-4 lg:mb-6">
+              <div className="p-2 lg:p-3 bg-teal-500/20 rounded-xl backdrop-blur-sm border border-teal-500/30">
+                <Shield size={20} className="text-teal-400" />
               </div>
-              <h1 className="text-3xl font-bold tracking-tight">PMS<span className="text-teal-400">.</span></h1>
+              <h1 className="text-xl md:text-2xl lg:text-3xl font-bold tracking-tight">PMS<span className="text-teal-400">.</span></h1>
             </div>
             <h2 className="text-3xl font-bold leading-tight mb-4">
               <span className="text-teal-400">Pharmacy</span> <br />
@@ -123,22 +123,22 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
             </p>
           </div>
 
-          <div className="relative z-10 space-y-3">
-            <div className="flex items-center gap-3 p-3 bg-white/5 rounded-xl border border-white/10 backdrop-blur-sm">
-              <div className="w-10 h-10 rounded-full bg-teal-500/20 flex items-center justify-center text-teal-400 font-bold text-sm">
+          <div className="relative z-10 space-y-2">
+            <div className="flex items-center gap-2 p-2 bg-white/5 rounded-lg border border-white/10 backdrop-blur-sm">
+              <div className="w-8 h-8 rounded-full bg-teal-500/20 flex items-center justify-center text-teal-400 font-bold text-xs">
                 KH
               </div>
               <div>
-                <p className="font-bold text-sm">Developed by Kachehub</p>
+                <p className="font-bold text-xs">Developed by Kachehub</p>
                 <p className="text-xs text-slate-400">Kachehubinfo@gmail.com</p>
               </div>
             </div>
-            <div className="flex items-center gap-3 p-3 bg-white/5 rounded-xl border border-white/10 backdrop-blur-sm">
-              <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 font-bold text-sm">
+            <div className="flex items-center gap-2 p-2 bg-white/5 rounded-lg border border-white/10 backdrop-blur-sm">
+              <div className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 font-bold text-xs">
                 HO
               </div>
               <div>
-                <p className="font-bold text-sm">Centralized Control</p>
+                <p className="font-bold text-xs">Centralized Control</p>
                 <p className="text-xs text-slate-400">Head Office Dashboard</p>
               </div>
             </div>
@@ -149,20 +149,20 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
         </div>
 
         {/* Right Side - Login Form */}
-        <div className="w-full md:w-1/2 p-6 flex flex-col justify-center bg-white">
+        <div className="w-full md:w-1/2 p-3 md:p-4 lg:p-6 flex flex-col justify-center bg-white">
           <div className="max-w-sm mx-auto w-full">
-            <h2 className="text-3xl font-bold text-slate-900 mb-2">Welcome Back</h2>
-            <p className="text-slate-500 mb-6">Sign in to access your pharmacy dashboard.</p>
+            <h2 className="text-xl md:text-2xl lg:text-3xl font-bold text-slate-900 mb-1 md:mb-2">Welcome Back</h2>
+            <p className="text-xs md:text-sm text-slate-500 mb-3 md:mb-6">Sign in to access your pharmacy dashboard.</p>
 
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={handleSubmit} className="space-y-3">
               {/* Username Input */}
               <div>
-                <label className="block text-sm font-bold text-slate-700 mb-2">Username</label>
+                <label className="block text-xs md:text-sm font-bold text-slate-700 mb-1 md:mb-2">Username</label>
                 <div className="relative group">
-                  <User className="absolute left-4 top-3.5 text-slate-400 group-focus-within:text-teal-600 transition-colors" size={20} />
+                  <User className="absolute left-2 md:left-3 top-2 md:top-3 text-slate-400 group-focus-within:text-teal-600 transition-colors" size={14} />
                   <input
                     type="text"
-                    className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-teal-500 focus:border-teal-500 outline-none transition-all font-medium placeholder-slate-400"
+                    className="w-full pl-8 md:pl-10 pr-3 md:pr-4 py-1.5 md:py-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 outline-none transition-all font-medium placeholder-slate-400 text-xs md:text-sm"
                     placeholder="Enter your username"
                     value={username}
                     onChange={(e) => {
@@ -178,12 +178,12 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
               {/* Password Input */}
               <div>
-                <label className="block text-sm font-bold text-slate-700 mb-2">Password</label>
+                <label className="block text-xs md:text-sm font-bold text-slate-700 mb-1 md:mb-2">Password</label>
                 <div className="relative group">
-                  <Lock className="absolute left-4 top-3.5 text-slate-400 group-focus-within:text-teal-600 transition-colors" size={20} />
+                  <Lock className="absolute left-2 md:left-3 top-2 md:top-3 text-slate-400 group-focus-within:text-teal-600 transition-colors" size={14} />
                   <input
                     type="password"
-                    className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-teal-500 focus:border-teal-500 outline-none transition-all font-medium placeholder-slate-400"
+                    className="w-full pl-8 md:pl-10 pr-3 md:pr-4 py-1.5 md:py-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 outline-none transition-all font-medium placeholder-slate-400 text-xs md:text-sm"
                     placeholder="••••••••"
                     value={password}
                     onChange={(e) => {
@@ -199,8 +199,8 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
               {/* Error Message */}
               {error && (
-                <div className="p-4 bg-rose-50 border border-rose-100 rounded-xl flex items-center gap-3 text-rose-600 text-sm font-medium animate-in fade-in slide-in-from-top-2 duration-300">
-                  <AlertTriangle size={18} className="shrink-0" />
+                <div className="p-2 md:p-3 bg-rose-50 border border-rose-100 rounded-lg flex items-center gap-2 text-rose-600 text-xs md:text-sm font-medium animate-in fade-in slide-in-from-top-2 duration-300">
+                  <AlertTriangle size={14} className="shrink-0" />
                   <span>{error}</span>
                 </div>
               )}
@@ -209,7 +209,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
               <button
                 type="submit"
                 disabled={isLoading || showSuccess}
-                className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg flex items-center justify-center gap-2 transition-all transform ${
+                className={`w-full py-2 md:py-3 rounded-lg font-bold text-sm md:text-base shadow-lg flex items-center justify-center gap-2 transition-all transform ${
                   isLoading ? 'opacity-80 cursor-not-allowed' : 'active:scale-95'
                 } ${
                   showSuccess
@@ -224,7 +224,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                   </>
                 ) : showSuccess ? (
                   <>
-                    <CheckCircle className="animate-bounce" size={20} />
+                    <CheckCircle size={20} />
                     {loggedInUser?.role.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, l => l.toUpperCase())} Access Granted!
                   </>
                 ) : (

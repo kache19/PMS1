@@ -109,27 +109,31 @@ const Clinical: React.FC<{ currentBranchId: string }> = ({ currentBranchId }) =>
   const [calcInput, setCalcInput] = useState({ weight: '', doseMgPerKg: '', concentrationMgPerMl: '' });
   const [calcResult, setCalcResult] = useState<string | null>(null);
 
-  // Load data on mount
+  // Load data function
+  const loadData = async () => {
+    setIsLoading(true);
+    try {
+      const [branchesData, patientsData, prescriptionsData] = await Promise.all([
+        api.getBranches(),
+        api.getPatients(),
+        api.getPrescriptions()
+      ]);
+      setBranches(branchesData || []);
+      setPatients(patientsData || []);
+      setPrescriptions(prescriptionsData || []);
+    } catch (error) {
+      console.error('Failed to load clinical data:', error);
+      showError('Data Loading Error', 'Failed to load clinical data from database.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Load data on mount and set up polling
   useEffect(() => {
-    const loadData = async () => {
-      setIsLoading(true);
-      try {
-        const [branchesData, patientsData, prescriptionsData] = await Promise.all([
-          api.getBranches(),
-          api.getPatients(),
-          api.getPrescriptions()
-        ]);
-        setBranches(branchesData || []);
-        setPatients(patientsData || []);
-        setPrescriptions(prescriptionsData || []);
-      } catch (error) {
-        console.error('Failed to load clinical data:', error);
-        showError('Data Loading Error', 'Failed to load clinical data from database.');
-      } finally {
-        setIsLoading(false);
-      }
-    };
     loadData();
+    const interval = setInterval(loadData, 30000); // Poll every 30 seconds
+    return () => clearInterval(interval);
   }, []);
 
   const currentBranch = branches.find(b => b.id === currentBranchId);
@@ -611,7 +615,7 @@ const Clinical: React.FC<{ currentBranchId: string }> = ({ currentBranchId }) =>
       {/* Patient Modal */}
       {showPatientModal && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-lg w-full max-w-full sm:max-w-md md:max-w-2xl lg:max-w-2xl max-h-[90vh] overflow-y-auto m-2 md:m-4">
             <div className="p-6 border-b border-slate-100">
               <h3 className="text-xl font-bold text-slate-900">{editingPatient ? 'Edit Patient' : 'Add New Patient'}</h3>
             </div>
@@ -690,7 +694,7 @@ const Clinical: React.FC<{ currentBranchId: string }> = ({ currentBranchId }) =>
       {/* Prescription Modal */}
       {showPrescriptionModal && selectedPatient && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-lg w-full max-w-full sm:max-w-md md:max-w-2xl lg:max-w-3xl max-h-[90vh] overflow-y-auto m-2 md:m-4">
             <div className="p-6 border-b border-slate-100">
               <h3 className="text-xl font-bold text-slate-900">New Prescription</h3>
               <p className="text-slate-500 text-sm">Create prescription for {selectedPatient.name}</p>

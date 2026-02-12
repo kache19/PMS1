@@ -23,13 +23,14 @@ const ExpenseModal: React.FC<ExpenseModalProps> = ({
       <div className="bg-white rounded-2xl w-full max-w-md p-6 animate-in fade-in zoom-in duration-200">
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-xl font-bold text-slate-900">Record Expense</h3>
-          <button onClick={() => setShowExpenseModal(false)} className="text-slate-400 hover:text-slate-600"><X size={24} /></button>
+          <button onClick={() => setShowExpenseModal(false)} className="text-slate-400 hover:text-slate-600" aria-label="Close modal"><X size={24} /></button>
         </div>
 
         <div className="space-y-4">
           <div>
-            <label className="text-sm font-medium text-slate-700">Description</label>
+            <label htmlFor="expense-description" className="text-sm font-medium text-slate-700">Description</label>
             <input
+              id="expense-description"
               type="text"
               className="w-full p-2 border border-slate-300 rounded-lg"
               placeholder="e.g. Office Cleaning"
@@ -40,8 +41,9 @@ const ExpenseModal: React.FC<ExpenseModalProps> = ({
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="text-sm font-medium text-slate-700">Category</label>
+              <label htmlFor="expense-category" className="text-sm font-medium text-slate-700">Category</label>
               <select
+                id="expense-category"
                 className="w-full p-2 border border-slate-300 rounded-lg"
                 value={newExpense.category}
                 onChange={e => setNewExpense({...newExpense, category: e.target.value})}
@@ -55,8 +57,9 @@ const ExpenseModal: React.FC<ExpenseModalProps> = ({
               </select>
             </div>
             <div>
-              <label className="text-sm font-medium text-slate-700">Amount (TZS)</label>
+              <label htmlFor="expense-amount" className="text-sm font-medium text-slate-700">Amount (TZS)</label>
               <input
+                id="expense-amount"
                 type="number"
                 className="w-full p-2 border border-slate-300 rounded-lg"
                 placeholder="0.00"
@@ -67,14 +70,16 @@ const ExpenseModal: React.FC<ExpenseModalProps> = ({
           </div>
 
           <div>
-            <label className="text-sm font-medium text-slate-700">Date</label>
+            <label htmlFor="expense-date" className="text-sm font-medium text-slate-700">Date</label>
             <input
+              id="expense-date"
               type="date"
               className="w-full p-2 border border-slate-300 rounded-lg"
               value={newExpense.date}
               onChange={e => setNewExpense({...newExpense, date: e.target.value})}
             />
           </div>
+
         </div>
 
         <div className="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">

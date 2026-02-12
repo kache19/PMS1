@@ -26,10 +26,26 @@ function getAuditLogs() {
 
         $limit = (int)($_GET['limit'] ?? 100);
         $offset = (int)($_GET['offset'] ?? 0);
-
-        $stmt = $pdo->prepare('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT ? OFFSET ?');
-        $stmt->bindValue(1, $limit, PDO::PARAM_INT);
-        $stmt->bindValue(2, $offset, PDO::PARAM_INT);
+        $userId = $_GET['userId'] ?? null;
+        
+        $sql = 'SELECT * FROM audit_logs';
+        $params = [];
+        
+        if ($userId) {
+            $sql .= ' WHERE user_id = ?';
+            $params[] = $userId;
+        }
+        
+        $sql .= ' ORDER BY timestamp DESC LIMIT ? OFFSET ?';
+        
+        $stmt = $pdo->prepare($sql);
+        $stmt->bindValue(count($params), $limit, PDO::PARAM_INT);
+        $stmt->bindValue(count($params) + 1, $offset, PDO::PARAM_INT);
+        
+        for ($i = 0; $i < count($params); $i++) {
+            $stmt->bindValue($i + 1, $params[$i], PDO::PARAM_STR);
+        }
+        
         $stmt->execute();
 
         $logs = $stmt->fetchAll();

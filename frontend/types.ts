@@ -1,4 +1,3 @@
-
 export enum UserRole {
   SUPER_ADMIN = 'SUPER_ADMIN',
   BRANCH_MANAGER = 'BRANCH_MANAGER',
@@ -6,7 +5,8 @@ export enum UserRole {
   DISPENSER = 'DISPENSER',
   STOREKEEPER = 'STOREKEEPER',
   INVENTORY_CONTROLLER = 'INVENTORY_CONTROLLER',
-  ACCOUNTANT = 'ACCOUNTANT'
+  ACCOUNTANT = 'ACCOUNTANT',
+  AUDITOR = 'AUDITOR'
 }
 
 export enum PaymentMethod {
@@ -24,6 +24,7 @@ export interface Branch {
   manager_id?: string;
   status: 'ACTIVE' | 'INACTIVE';
   isHeadOffice?: boolean;
+  lastSync?: string;
   created_at?: string;
 }
 
@@ -41,13 +42,17 @@ export interface Staff {
   password?: string; // Added for Auth (Mock only - in real app this is hashed)
 }
 
-export type BatchStatus = 'ACTIVE' | 'ON_HOLD' | 'REJECTED' | 'EXPIRED';
+export type BatchStatus = 'ACTIVE' | 'REJECTED' | 'EXPIRED';
 
 export interface DrugBatch {
   batchNumber: string;
   expiryDate: string; // ISO Date
   quantity: number;
   status: BatchStatus; // Added for Release Protocol
+  supplierName?: string; // Supplier name where batch came from
+  supplierId?: string; // Supplier ID where batch came from
+  restockStatus?: 'PENDING' | 'RECEIVED' | 'IN_TRANSIT';
+  lastRestockDate?: string;
 }
 
 export interface Product {
@@ -62,13 +67,18 @@ export interface Product {
   batches: DrugBatch[];
   requiresPrescription: boolean;
   totalStock: number; // Calculated field
+  baseStock?: number; // Active stock (frontend calculated)
+  pendingIncoming?: number; // Pending incoming quantity (frontend calculated)
 }
 
 export interface BranchInventoryItem {
   productId: string;
   quantity: number;
   batches: DrugBatch[];
-  customPrice?: number; // Optional override for branch-specific pricing
+  pendingIncoming?: number;
+  customPrice?: number;
+  restockStatus?: 'NORMAL' | 'LOW_STOCK' | 'RESTOCKED' | 'OUT_OF_STOCK';
+  lastRestockDate?: string;
 }
 
 export interface CartItem extends Product {
@@ -182,6 +192,8 @@ export interface DisposalRequest {
 export interface InvoicePayment {
   id: string;
   amount: number;
+  discount: number;
+  discountPercent?: number;
   date: string;
   receiptNumber: string;
   method: PaymentMethod;
@@ -192,6 +204,8 @@ export interface Invoice {
   id: string;
   branchId: string;
   customerName: string;
+  customerPhone?: string;
+  customerEmail?: string;
   dateIssued: string;
   dueDate: string;
   totalAmount: number;
@@ -202,7 +216,6 @@ export interface Invoice {
   items?: CartItem[]; // Items from POS
   payments: InvoicePayment[];
   paymentMethod?: PaymentMethod; // Payment method for display
-  includeVAT?: boolean; // Whether to include VAT in calculations
   archived?: boolean;
 }
 
@@ -297,6 +310,21 @@ export interface AuditLog {
   severity: 'INFO' | 'WARNING' | 'CRITICAL';
 }
 
+// User Login Tracker
+export interface LoginTracker {
+  id: string;
+  userId: string;
+  userName: string;
+  branchId: string;
+  branchName: string;
+  ipAddress?: string;
+  deviceInfo?: string;
+  loginTime: string;
+  logoutTime?: string | null;
+  sessionDurationMinutes?: number | null;
+  status: 'active' | 'inactive';
+}
+
 // Shipment Types (New Notification System)
 export interface Shipment {
   id: string;
@@ -326,6 +354,36 @@ export interface ShipmentApprover {
   notifiedAt?: string;
   respondedAt?: string;
   response: 'APPROVED' | 'REJECTED' | 'PENDING';
+}
+
+// Entity Types (Customers and Suppliers)
+export type EntityType = 'CUSTOMER' | 'SUPPLIER' | 'BOTH';
+export type EntityStatus = 'ACTIVE' | 'INACTIVE' | 'BLOCKED';
+
+export interface Entity {
+  id: string;
+  name: string;
+  type: EntityType;
+  email?: string;
+  phone?: string;
+  address?: string;
+  city?: string;
+  country?: string;
+  tin?: string;
+  vatNumber?: string;
+  contactPerson?: string;
+  contactPhone?: string;
+  paymentTerms?: string;
+  creditLimit: number;
+  currentBalance: number;
+  discountPercentage: number;
+  taxExempt: boolean;
+  notes?: string;
+  status: EntityStatus;
+  parentEntityId?: string;
+  branchId?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 // Audit Logs (Enhanced)

@@ -11,11 +11,26 @@ import {
   Prescription,
   SystemSetting,
   AuditLog,
+  LoginTracker,
   CartItem,
-  PaymentMethod
+  PaymentMethod,
+  Entity
 } from '../types';
 
-export const API_URL = 'https://malenyapharmacy.com/backend_php/index.php/api/';
+// Use explicit env override when provided; otherwise choose a sensible default
+const getApiUrl = () => {
+  // Check for VITE_API_URL first (Vite environment variable)
+  const envUrl = (import.meta as any)?.env?.VITE_API_URL;
+  if (envUrl) {
+    return envUrl.endsWith('/') ? envUrl : `${envUrl}/`;
+  }
+
+  // In Vite dev, use proxy. In production, hit PHP backend route directly.
+  const isDev = Boolean((import.meta as any)?.env?.DEV);
+  return isDev ? '/api/' : `${window.location.origin}/backend_php/index.php/api/`;
+};
+
+export const API_URL = getApiUrl();
 const REQUEST_TIMEOUT = 30000; // 30 seconds
 
 /**
@@ -30,8 +45,8 @@ async function fetchJSON(path: string, options: RequestInit = {}) {
     'Accept': 'application/json'
   };
 
-  // Add auth token if available
-  const token = localStorage.getItem('authToken');
+  // Prefer localStorage to match App session persistence behavior.
+  const token = localStorage.getItem('authToken') || sessionStorage.getItem('authToken');
   if (token) {
     defaultHeaders['Authorization'] = `Bearer ${token}`;
   }
@@ -58,11 +73,16 @@ async function fetchJSON(path: string, options: RequestInit = {}) {
       return null;
     }
 
-    // Handle 401 Unauthorized - redirect to login
+    // Handle 401 Unauthorized - dispatch event for app to handle (no page refresh)
     if (res.status === 401) {
       localStorage.removeItem('authToken');
       localStorage.removeItem('user');
-      window.location.href = '/login';
+      sessionStorage.removeItem('authToken');
+      sessionStorage.removeItem('user');
+      // Dispatch custom event instead of page refresh
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('pms:auth-expired', { detail: { message: 'Session expired. Please login again.' } }));
+      }
       throw new Error('Unauthorized. Please login again.');
     }
 
@@ -71,7 +91,7 @@ async function fetchJSON(path: string, options: RequestInit = {}) {
       let errorMessage = `${res.status} ${res.statusText}`;
       try {
         const errorBody = await res.json();
-        errorMessage = errorBody.message || errorMessage;
+        errorMessage = errorBody.error || errorBody.message || errorMessage;
       } catch {
         const textBody = await res.text().catch(() => '');
         if (textBody) errorMessage = textBody;
@@ -87,6 +107,13 @@ async function fetchJSON(path: string, options: RequestInit = {}) {
 
     // Handle network errors
     if (error instanceof TypeError && error.message === 'Failed to fetch') {
+      // Log warning for network errors
+      console.warn(`Network error for ${method} ${path} - server may be unreachable`);
+      
+      // Don't throw - just log and return empty array for get endpoints, or throw for others
+      if (path.startsWith('get') || path.includes('?')) {
+        return [];
+      }
       throw new Error('Network error. Please check your connection and try again.');
     }
 
@@ -115,6 +142,8 @@ export const login = async (username: string, password: string) => {
 function logout(): void {
   localStorage.removeItem('authToken');
   localStorage.removeItem('user');
+  sessionStorage.removeItem('authToken');
+  sessionStorage.removeItem('user');
 }
 
 /**
@@ -122,7 +151,7 @@ function logout(): void {
  */
 function getCurrentUser(): Staff | null {
   try {
-    const userJson = localStorage.getItem('user');
+    const userJson = localStorage.getItem('user') || sessionStorage.getItem('user');
     return userJson ? JSON.parse(userJson) : null;
   } catch {
     return null;
@@ -133,7 +162,7 @@ function getCurrentUser(): Staff | null {
  * Check if user is authenticated
  */
 function isAuthenticated(): boolean {
-  return !!localStorage.getItem('authToken');
+  return !!(localStorage.getItem('authToken') || sessionStorage.getItem('authToken'));
 }
 
 export const api = {
@@ -224,6 +253,7 @@ export const api = {
        body: JSON.stringify(batch)
      }),
 
+
   // Transfers
    getTransfers: (): Promise<StockTransfer[]> =>
      fetchJSON('inventory/transfers').catch(() => []),
@@ -289,6 +319,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payment)
     }),
+
+  getFinancialSummary: (params?: { branchId?: string; startDate?: string; endDate?: string }): Promise<any> => {
+    const queryParams = new URLSearchParams();
+    if (params?.branchId) queryParams.append('branchId', params.branchId);
+    if (params?.startDate) queryParams.append('startDate', params.startDate);
+    if (params?.endDate) queryParams.append('endDate', params.endDate);
+    const query = queryParams.toString();
+    return fetchJSON(`finance/summary${query ? '?' + query : ''}`).catch(() => ({
+      totalSales: 0,
+      totalProfit: 0,
+      totalExpenses: 0,
+      totalInvoiced: 0,
+      totalReceived: 0,
+      netIncome: 0
+    }));
+  },
 
   // Expenses
   getExpenses: (): Promise<Expense[]> =>
@@ -392,11 +438,58 @@ export const api = {
     }),
 
   // Audit Logs
-  getAuditLogs: (): Promise<AuditLog[]> =>
-    fetchJSON('audit-logs').catch(() => []),
+  getAuditLogs: (params?: { limit?: number; offset?: number; userId?: string }): Promise<AuditLog[]> => {
+    const queryParams = new URLSearchParams();
+    if (params?.limit) queryParams.append('limit', params.limit.toString());
+    if (params?.offset) queryParams.append('offset', params.offset.toString());
+    if (params?.userId) queryParams.append('userId', params.userId);
+    const query = queryParams.toString();
+    return fetchJSON(`audit-logs${query ? '?' + query : ''}`).catch(() => []);
+  },
 
   getAuditLog: (id: string): Promise<AuditLog | null> =>
     fetchJSON(`audit-logs/${id}`).catch(() => null),
+
+  // Login Trackers
+  getLoginTrackers: (params?: { branch?: string; days?: number }): Promise<LoginTracker[]> => {
+    const queryParams = new URLSearchParams();
+    queryParams.append('action', 'login-trackers');
+    if (params?.branch) queryParams.append('branch', params.branch);
+    if (params?.days) queryParams.append('days', params.days.toString());
+    return fetchJSON(`settings?${queryParams.toString()}`).catch(() => []);
+  },
+
+  // Backup & Restore
+  createBackup: (): Promise<any> =>
+    fetchJSON('backup?action=create', { method: 'POST' }).catch(() => ({})),
+
+  listBackups: (): Promise<any[]> =>
+    fetchJSON('backup?action=list').catch(() => []),
+
+  downloadBackup: (filename: string): Promise<Blob> =>
+    fetch(`${API_URL}/backup?action=download&filename=${encodeURIComponent(filename)}`).then(r => r.blob()).catch(() => new Blob()),
+
+  restoreBackup: (filename: string): Promise<any> =>
+    fetchJSON(`backup?action=restore&filename=${encodeURIComponent(filename)}`).catch(() => ({})),
+
+  deleteBackup: (filename: string): Promise<any> =>
+    fetchJSON('backup?action=delete', {
+      method: 'DELETE',
+      body: JSON.stringify({ filename })
+    }).catch(() => ({})),
+
+  getBackupStatus: (): Promise<any> =>
+    fetchJSON('backup?action=status').catch(() => ({})),
+
+  scheduleAutoBackup: (config: { enabled: boolean; backupTime: string; retentionDays: number }): Promise<any> =>
+    fetchJSON('backup?action=schedule', {
+      method: 'POST',
+      body: JSON.stringify({
+        enabled: config.enabled,
+        backupTime: config.backupTime,
+        retentionDays: config.retentionDays
+      })
+    }).catch(() => ({})),
 
   // Sessions
   getSessions: (): Promise<any[]> =>
@@ -437,15 +530,39 @@ export const api = {
       body: JSON.stringify({ status, approvedBy })
     }),
 
-  // Release Requests
-  getReleaseRequests: (): Promise<any[]> =>
-    fetchJSON('releases').catch(() => []),
-
-  approveReleaseRequest: (id: string): Promise<any> =>
-    fetchJSON(`releases/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ status: 'APPROVED' })
+  initiateShipment: (requisitionId: string, items: any[], notes: string, branchId: string): Promise<any> =>
+    fetchJSON(`requisitions/${requisitionId}?action=initiate-shipment`, {
+      method: 'POST',
+      body: JSON.stringify({ items, notes, branchId })
     }),
+
+  // Release Requests
+   getReleaseRequests: (): Promise<any[]> =>
+     fetchJSON('releases').catch(() => []),
+
+   createReleaseRequest: (payload: any): Promise<any> =>
+     fetchJSON('releases', {
+       method: 'POST',
+       body: JSON.stringify(payload)
+     }),
+
+   approveReleaseRequest: (id: string): Promise<any> =>
+     fetchJSON(`releases/${id}`, {
+       method: 'PUT',
+       body: JSON.stringify({ status: 'APPROVED' })
+     }),
+
+   rejectReleaseRequest: (id: string): Promise<any> =>
+     fetchJSON(`releases/${id}`, {
+       method: 'PUT',
+       body: JSON.stringify({ status: 'REJECTED' })
+     }),
+
+   updateReleaseStatus: (id: string, status: string): Promise<any> =>
+     fetchJSON(`releases/${id}`, {
+       method: 'PUT',
+       body: JSON.stringify({ status })
+     }),
 
   // Disposal Requests
   getDisposalRequests: (): Promise<any[]> =>
@@ -480,6 +597,41 @@ export const api = {
       body: JSON.stringify(payload)
     }),
 
+  // Customer Shipments (for external customers like Malenya Sayuni Medics)
+  createCustomerShipment: (payload: {
+    customerName: string;
+    branchId?: string;
+    products?: Array<{
+      id: string;
+      name?: string;
+      quantity: number;
+      price: number;
+    }>;
+    notes?: string;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    shipment: {
+      id: string;
+      customerName: string;
+      customerId: string;
+      status: string;
+      totalValue: number;
+      itemsCount: number;
+    };
+    invoice: {
+      id: string;
+      totalAmount: number;
+      status: string;
+      dueDate: string;
+      items: any[];
+    };
+  }> =>
+    fetchJSON('shipments/customer-shipment', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+
   // Stock
   addStock: async (data: {
     branchId: string;
@@ -487,12 +639,43 @@ export const api = {
     batchNumber: string;
     expiryDate: string;
     quantity: number;
+    supplierId?: string;
+    supplierName?: string;
+    restockStatus?: string;
+    lastRestockDate?: string;
   }) => {
-    return fetchJSON('inventory/add', {
+    return fetchJSON('inventory/addStock', {
       method: 'POST',
       body: JSON.stringify(data)
     });
-  }
+  },
+
+  // Entities (Customers & Suppliers)
+  getEntities: (params?: { type?: string; status?: string }): Promise<Entity[]> => {
+    const queryParams = new URLSearchParams();
+    if (params?.type) queryParams.append('type', params.type);
+    if (params?.status) queryParams.append('status', params.status);
+    const query = queryParams.toString();
+    return fetchJSON(`entities${query ? '?' + query : ''}`);
+  },
+
+  getEntity: (id: string): Promise<Entity | null> =>
+    fetchJSON(`entities/${id}`).catch(() => null),
+
+  createEntity: (payload: Partial<Entity>): Promise<Entity> =>
+    fetchJSON('entities', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+
+  updateEntity: (id: string, payload: Partial<Entity>): Promise<Entity> =>
+    fetchJSON(`entities/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    }),
+
+  deleteEntity: (id: string): Promise<void> =>
+    fetchJSON(`entities/${id}`, { method: 'DELETE' })
 };
 
 const handleInvoicePayment = async (

@@ -1,62 +1,69 @@
 <?php
 require_once dirname(__DIR__) . '/config/database.php';
 require_once dirname(__DIR__) . '/utils/auth.php';
+require_once dirname(__DIR__) . '/vendor/autoload.php';
 
 global $pdo;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-$path = str_replace('/api/inventory', '', $path);
-$path = str_replace('/api/stock', '', $path); // Handle /api/stock alias
 
-// Parse path parameters
-$id = $_GET['id'] ?? null;
-$id2 = $_GET['id2'] ?? null;
-$subpath = $_GET['subpath'] ?? null;
+// Try to extract action reliably from URI (supports /api/inventory/addStock and variants)
+$action = null;
+$id = null;
+$id2 = null;
 
-$branchId = $id;
-$productId = $id2;
-$action = $subpath;
-
-// Special handling for /inventory/transfers
-$request_uri = $_SERVER['REQUEST_URI'] ?? '';
-if (strpos($request_uri, '/inventory/transfers') !== false) {
-    $action = 'transfers';
+if (preg_match('#/api/(?:backend_php/index.php/)?(?:inventory|stock)(?:/([^/]+))?#', $path, $m)) {
+    // $m[1] will be the first segment after /inventory or /stock (e.g. BR003 or addStock)
+    $first = $m[1] ?? null;
+    if ($first) {
+        // If first segment starts with a letter assume it's an action (like 'addStock'), otherwise treat as id
+        if (preg_match('/^[A-Za-z]/', $first)) {
+            $action = $first;
+        } else {
+            $id = $first;
+        }
+    }
+    // Also attempt to capture a second segment
+    if (preg_match('#/api/(?:backend_php/index.php/)?(?:inventory|stock)/(?:[^/]+)/(?:([^/]+))#', $path, $m2)) {
+        $id2 = $m2[1] ?? null;
+    }
 }
+error_log("Inventory route - PATH: $path");
+error_log("Inventory route - action: " . ($action ?? 'NULL') . ", id: " . ($id ?? 'NULL') . ", id2: " . ($id2 ?? 'NULL'));
+error_log("Inventory route - \$_GET: " . json_encode($_GET));
 
-error_log("Inventory route - method: $method, id: $id, id2: $id2, subpath: $subpath, action: $action, branchId: $branchId, productId: $productId, URI: $request_uri");
+// Also support query parameters as fallback
+if (isset($_GET['id'])) $id = $_GET['id'];
+if (isset($_GET['id2'])) $id2 = $_GET['id2'];
+if (isset($_GET['subpath'])) $action = $_GET['subpath'];
 
 switch ($method) {
     case 'GET':
-        if ($action === 'transfers') {
-            getTransfers();
-        } elseif ($branchId && !$productId) {
+        // Support both path-based (/api/inventory/BR002) and query-based (/api/inventory?id=BR002) routing
+        $branchId = $id ?: ($_GET['id'] ?? null);
+        if ($branchId) {
             getBranchInventory($branchId);
         } else {
             getAllInventory();
         }
         break;
     case 'POST':
-        if ($action === 'add' || (!$action && !$branchId)) {
-            addStock();
-        } elseif ($action === 'transfers') {
-            error_log("Calling createTransfer()");
+        // Accept both singular 'transfer' and plural 'transfers' (frontend uses 'inventory/transfers')
+        if ($action === 'transfer' || $action === 'transfers' || $path === '/inventory/transfers' || (isset($_GET['subpath']) && $_GET['subpath'] === 'transfers')) {
             createTransfer();
+        } elseif ($action === 'addStock' || $action === 'add') {
+            addStock();
         } elseif ($action === 'adjust') {
             adjustStock();
-        } elseif ($id && $action === 'verify-storekeeper') {
-            verifyTransferByStoreKeeper($id);
-        } elseif ($id && $action === 'verify-controller') {
-            verifyTransferByController($id);
-        } elseif ($id && $action === 'approve') {
-            approveTransfer($id);
         } else {
-            error_log("No matching POST action found - action: '$action', branchId: '$branchId'");
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid action']);
         }
         break;
     case 'PUT':
-        if ($branchId && $productId) {
-            updateInventoryItem($branchId, $productId);
+        if ($id && $action === 'verify') {
+            verifyTransferByStoreKeeper($id);
         }
         break;
     default:
@@ -70,7 +77,6 @@ function getAllInventory() {
     try {
         authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER']);
 
-        // First get all inventory items
         $stmt = $pdo->query("
             SELECT
                 bi.branch_id,
@@ -80,24 +86,18 @@ function getAllInventory() {
                 p.name, p.generic_name, p.category, p.cost_price, p.base_price, p.unit, p.min_stock_level
             FROM branch_inventory bi
             JOIN products p ON bi.product_id = p.id
-            ORDER BY bi.branch_id, p.name
+            ORDER BY p.name
         ");
-
         $rows = $stmt->fetchAll();
-        $inventoryMap = [];
 
-        // Get batches separately for each product
+        $inventoryMap = [];
         foreach ($rows as $row) {
             $branchId = $row['branch_id'];
             $productId = $row['product_id'];
 
-            if (!isset($inventoryMap[$branchId])) {
-                $inventoryMap[$branchId] = [];
-            }
-
             // Get batches for this product
             $batchStmt = $pdo->prepare("
-                SELECT batch_number, expiry_date, quantity, status
+                SELECT batch_number, expiry_date, quantity, status, supplier_id, supplier_name, restock_status, last_restock_date
                 FROM drug_batches
                 WHERE branch_id = ? AND product_id = ?
                 ORDER BY expiry_date
@@ -106,63 +106,7 @@ function getAllInventory() {
             $batches = $batchStmt->fetchAll(PDO::FETCH_ASSOC);
 
             $inventoryMap[$branchId][] = [
-                'productId' => $row['product_id'],
-                'quantity' => (int)$row['quantity'],
-                'customPrice' => (float)$row['custom_price'],
-                'batches' => array_map(function($batch) {
-                    return [
-                        'batchNumber' => $batch['batch_number'],
-                        'expiryDate' => $batch['expiry_date'],
-                        'quantity' => (int)$batch['quantity'],
-                        'status' => $batch['status']
-                    ];
-                }, $batches)
-            ];
-        }
-
-        echo json_encode($inventoryMap);
-    } catch (Exception $e) {
-        error_log('Failed to fetch inventory: ' . $e->getMessage());
-        http_response_code(500);
-        echo json_encode(['error' => $e->getMessage()]);
-    }
-}
-
-function getBranchInventory($branchId) {
-    global $pdo;
-
-    try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER']);
-
-        $stmt = $pdo->prepare("
-            SELECT
-                bi.product_id,
-                bi.quantity,
-                bi.custom_price,
-                p.name, p.generic_name, p.category, p.cost_price, p.base_price, p.unit, p.min_stock_level
-            FROM branch_inventory bi
-            JOIN products p ON bi.product_id = p.id
-            WHERE bi.branch_id = ?
-            ORDER BY p.name
-        ");
-        $stmt->execute([$branchId]);
-
-        $rows = $stmt->fetchAll();
-        $inventory = [];
-
-        foreach ($rows as $row) {
-            // Get batches for this product
-            $batchStmt = $pdo->prepare("
-                SELECT batch_number, expiry_date, quantity, status
-                FROM drug_batches
-                WHERE branch_id = ? AND product_id = ?
-                ORDER BY expiry_date
-            ");
-            $batchStmt->execute([$branchId, $row['product_id']]);
-            $batches = $batchStmt->fetchAll(PDO::FETCH_ASSOC);
-
-            $inventory[] = [
-                'productId' => $row['product_id'],
+                'productId' => $productId,
                 'name' => $row['name'],
                 'genericName' => $row['generic_name'],
                 'category' => $row['category'],
@@ -177,13 +121,286 @@ function getBranchInventory($branchId) {
                         'batchNumber' => $batch['batch_number'],
                         'expiryDate' => $batch['expiry_date'],
                         'quantity' => (int)$batch['quantity'],
-                        'status' => $batch['status']
+                        'status' => $batch['status'],
+                        'supplierId' => $batch['supplier_id'] ?? null,
+                        'supplierName' => $batch['supplier_name'] ?? null,
+                        'restockStatus' => $batch['restock_status'] ?? null,
+                        'lastRestockDate' => $batch['last_restock_date'] ?? null
                     ];
                 }, $batches)
             ];
         }
 
+        echo json_encode($inventoryMap);
+    } catch (Exception $e) {
+        error_log('Failed to fetch inventory: ' . $e->getMessage());
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+}
+
+function exportInventory() {
+    global $pdo;
+
+    try {
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_CONTROLLER', 'ACCOUNTANT']);
+
+        $format = strtolower($_GET['format'] ?? 'pdf');
+        $branchId = $_GET['branchId'] ?? null;
+
+        // Get inventory data
+        $query = "SELECT bi.branch_id, bi.product_id, bi.quantity, bi.custom_price, p.name, p.generic_name, p.category, p.base_price, p.unit FROM branch_inventory bi JOIN products p ON bi.product_id = p.id";
+        $params = [];
+        if ($branchId) {
+            $query .= " WHERE bi.branch_id = ?";
+            $params[] = $branchId;
+        }
+        $query .= " ORDER BY p.name";
+
+        $stmt = $pdo->prepare($query);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // Get branch name if filtering by branch
+        $branchName = $branchId;
+        if ($branchId) {
+            $branchStmt = $pdo->prepare("SELECT name FROM branches WHERE id = ?");
+            $branchStmt->execute([$branchId]);
+            $branchRow = $branchStmt->fetch();
+            $branchName = $branchRow ? $branchRow['name'] : $branchId;
+        }
+
+        // Build professional inventory report HTML
+        $totalValue = 0;
+        $totalQuantity = 0;
+        foreach ($rows as $r) {
+            $totalQuantity += (int)$r['quantity'];
+            $totalValue += ((float)$r['custom_price'] ?: (float)$r['base_price']) * (int)$r['quantity'];
+        }
+
+        $html = '<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Inventory Report</title>
+    <style>
+        * { margin: 0; padding: 0; }
+        body { font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; background: #fff; color: #333; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 40px; }
+        .header { border-bottom: 3px solid #0066cc; margin-bottom: 30px; padding-bottom: 20px; }
+        .company-name { font-size: 28px; font-weight: bold; color: #0066cc; margin-bottom: 10px; }
+        .report-title { font-size: 20px; font-weight: 600; color: #333; margin-bottom: 5px; }
+        .report-info { font-size: 13px; color: #666; margin-top: 10px; }
+        .summary { display: flex; gap: 40px; margin: 30px 0; padding: 20px; background: #f5f9ff; border-left: 4px solid #0066cc; border-radius: 4px; }
+        .summary-item { flex: 1; }
+        .summary-label { font-size: 12px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+        .summary-value { font-size: 24px; font-weight: bold; color: #0066cc; margin-top: 5px; }
+        table { width: 100%; border-collapse: collapse; margin: 30px 0; }
+        thead { background: #0066cc; color: white; }
+        th { padding: 14px; text-align: left; font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #0066cc; }
+        td { padding: 12px 14px; border-bottom: 1px solid #e0e0e0; font-size: 13px; }
+        tbody tr:nth-child(even) { background: #f9f9f9; }
+        tbody tr:hover { background: #f0f5ff; }
+        .text-right { text-align: right; }
+        .text-center { text-align: center; }
+        .product-name { font-weight: 600; color: #0066cc; }
+        .category-badge { display: inline-block; padding: 4px 8px; background: #e0e0e0; border-radius: 3px; font-size: 11px; }
+        tfoot { background: #f5f5f5; font-weight: 600; }
+        tfoot td { border-top: 2px solid #0066cc; padding: 14px; }
+        .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #ddd; font-size: 12px; color: #666; }
+        @media print { body { padding: 0; } .container { padding: 20px; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="company-name">PHARMACY MANAGEMENT SYSTEM</div>
+            <div class="report-title">📊 Inventory Status Report</div>
+            <div class="report-info">
+                <strong>Branch:</strong> ' . htmlspecialchars($branchName) . ' | 
+                <strong>Generated:</strong> ' . date('M d, Y @ H:i:s') . ' | 
+                <strong>Total Items:</strong> ' . count($rows) . ' products
+            </div>
+        </div>
+
+        <div class="summary">
+            <div class="summary-item">
+                <div class="summary-label">Total Quantity</div>
+                <div class="summary-value">' . $totalQuantity . ' units</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Inventory Value</div>
+                <div class="summary-value">₱' . number_format($totalValue, 2) . '</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Average Unit Price</div>
+                <div class="summary-value">₱' . (count($rows) > 0 ? number_format($totalValue / count($rows), 2) : '0.00') . '</div>
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Product Name</th>
+                    <th>Category</th>
+                    <th class="text-center">Unit</th>
+                    <th class="text-right">Quantity</th>
+                    <th class="text-right">Unit Price</th>
+                    <th class="text-right">Total Value</th>
+                </tr>
+            </thead>
+            <tbody>';
+
+        foreach ($rows as $r) {
+            $unitPrice = (float)$r['custom_price'] ?: (float)$r['base_price'];
+            $itemValue = $unitPrice * (int)$r['quantity'];
+            $html .= '<tr>
+                <td><span class="product-name">' . htmlspecialchars($r['name']) . '</span></td>
+                <td><span class="category-badge">' . htmlspecialchars($r['category']) . '</span></td>
+                <td class="text-center">' . htmlspecialchars($r['unit'] ?? 'unit') . '</td>
+                <td class="text-right"><strong>' . (int)$r['quantity'] . '</strong></td>
+                <td class="text-right">₱' . number_format($unitPrice, 2) . '</td>
+                <td class="text-right">₱' . number_format($itemValue, 2) . '</td>
+            </tr>';
+        }
+
+        $html .= '</tbody>
+            <tfoot>
+                <tr>
+                    <td colspan="3">TOTALS</td>
+                    <td class="text-right">' . $totalQuantity . ' units</td>
+                    <td></td>
+                    <td class="text-right">₱' . number_format($totalValue, 2) . '</td>
+                </tr>
+            </tfoot>
+        </table>
+
+        <div class="footer">
+            <p>This is an automatically generated report. For inquiries, contact your branch manager.</p>
+            <p style="margin-top: 10px; color: #999; font-size: 11px;">Inventory Management System © 2026</p>
+        </div>
+    </div>
+</body>
+</html>';
+
+        // Output based on format
+        if ($format === 'excel') {
+            // Excel format - send as HTML (opens in Excel with formatting preserved)
+            $filename = 'Inventory_Report_' . ($branchId ?: 'AllBranches') . '_' . date('Y-m-d_His') . '.html';
+            header('Content-Type: application/vnd.ms-excel; charset=utf-8');
+            header('Content-Disposition: attachment; filename="' . $filename . '"');
+            echo $html;
+        } else {
+            // PDF format - try server-side PDF, fallback to printable HTML
+            if (class_exists('Dompdf\Dompdf')) {
+                try {
+                    // @phpstan-ignore-next-line
+                    // @phpstan-ignore-line
+                    $dompdf = new \Dompdf\Dompdf();
+                    $dompdf->loadHtml($html);
+                    $dompdf->setPaper('A4', 'portrait');
+                    $dompdf->render();
+                    header('Content-Type: application/pdf');
+                    header('Content-Disposition: attachment; filename="Inventory_Report_' . ($branchId ?: 'AllBranches') . '_' . date('Y-m-d_His') . '.pdf"');
+                    echo $dompdf->output();
+                    return;
+                } catch (Exception $e) {
+                    error_log('Dompdf render failed: ' . $e->getMessage());
+                }
+            }
+            // Fallback to printable HTML
+            header('Content-Type: text/html; charset=utf-8');
+            echo $html;
+        }
+    } catch (Exception $e) {
+        error_log('Failed to export inventory: ' . $e->getMessage());
+        http_response_code(500);
+        echo json_encode(['error' => 'Failed to export inventory', 'details' => $e->getMessage()]);
+    }
+}
+
+function getBranchInventory($branchId) {
+    global $pdo;
+
+    try {
+        // authorizeRoles returns null for unauthenticated GET requests
+        $user = authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER']);
+        
+        // Get all inventory items for the branch
+        $stmt = $pdo->prepare("
+            SELECT
+                bi.product_id,
+                bi.quantity,
+                bi.custom_price,
+                p.name, p.generic_name, p.category, p.cost_price, p.base_price, p.unit, p.min_stock_level
+            FROM branch_inventory bi
+            JOIN products p ON bi.product_id = p.id
+            WHERE bi.branch_id = ?
+            ORDER BY p.name
+        ");
+        $stmt->execute([$branchId]);
+        $rows = $stmt->fetchAll();
+        
+        if (empty($rows)) {
+            echo json_encode([]);
+            return;
+        }
+        
+        // Get all batches for the branch in a single query
+        $productIds = array_column($rows, 'product_id');
+        $placeholders = implode(',', array_fill(0, count($productIds), '?'));
+        $batchStmt = $pdo->prepare("
+            SELECT product_id, batch_number, expiry_date, quantity, status, supplier_id, supplier_name, restock_status, last_restock_date
+            FROM drug_batches
+            WHERE branch_id = ? AND product_id IN ($placeholders)
+            ORDER BY product_id, expiry_date
+        ");
+        $batchStmt->execute(array_merge([$branchId], $productIds));
+        $allBatches = $batchStmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Group batches by product_id
+        $batchesByProduct = [];
+        foreach ($allBatches as $batch) {
+            $productId = $batch['product_id'];
+            if (!isset($batchesByProduct[$productId])) {
+                $batchesByProduct[$productId] = [];
+            }
+            $batchesByProduct[$productId][] = [
+                'batchNumber' => $batch['batch_number'],
+                'expiryDate' => $batch['expiry_date'],
+                'quantity' => (int)$batch['quantity'],
+                'status' => $batch['status'],
+                'supplierId' => $batch['supplier_id'] ?? null,
+                'supplierName' => $batch['supplier_name'] ?? null,
+                'restockStatus' => $batch['restock_status'] ?? null,
+                'lastRestockDate' => $batch['last_restock_date'] ?? null
+            ];
+        }
+        
+        // Build inventory array
+        $inventory = [];
+        foreach ($rows as $row) {
+            $productId = $row['product_id'];
+            $inventory[] = [
+                'productId' => $productId,
+                'name' => $row['name'],
+                'genericName' => $row['generic_name'],
+                'category' => $row['category'],
+                'quantity' => (int)$row['quantity'],
+                'customPrice' => (float)$row['custom_price'],
+                'costPrice' => (float)$row['cost_price'],
+                'basePrice' => (float)$row['base_price'],
+                'unit' => $row['unit'],
+                'minStockLevel' => (int)$row['min_stock_level'],
+                'batches' => $batchesByProduct[$productId] ?? []
+            ];
+        }
+        
         echo json_encode($inventory);
+    } catch (PDOException $e) {
+        error_log('Failed to fetch branch inventory: ' . $e->getMessage());
+        http_response_code(500);
+        echo json_encode(['error' => 'Database error: Unable to fetch inventory']);
     } catch (Exception $e) {
         error_log('Failed to fetch branch inventory: ' . $e->getMessage());
         http_response_code(500);
@@ -198,27 +415,57 @@ function addStock() {
         authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_CONTROLLER']);
         $input = json_decode(file_get_contents('php://input'), true);
 
+        if (!$input || !is_array($input)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid JSON payload']);
+            return;
+        }
+
         $branchId = $input['branchId'] ?? '';
         $productId = $input['productId'] ?? '';
         $batchNumber = $input['batchNumber'] ?? '';
         $expiryDate = $input['expiryDate'] ?? '';
         $quantity = (int)($input['quantity'] ?? 0);
+        $supplierId = $input['supplierId'] ?? null;
+        $supplierName = $input['supplierName'] ?? null;
+        $restockStatus = $input['restockStatus'] ?? 'RECEIVED';
+        $lastRestockDate = date('Y-m-d H:i:s');
 
         $pdo->beginTransaction();
 
-        // Insert/Update Batch
-        $stmt = $pdo->prepare("
-            INSERT INTO drug_batches (branch_id, product_id, batch_number, expiry_date, quantity, status)
-            VALUES (?, ?, ?, ?, ?, 'ACTIVE')
-        ");
-        $stmt->execute([$branchId, $productId, $batchNumber, $expiryDate, $quantity]);
+        // Validate core fields
+        if (empty($branchId) || empty($productId) || $quantity <= 0) {
+            http_response_code(400);
+            echo json_encode(['error' => 'branchId, productId and quantity (>0) are required']);
+            return;
+        }
 
-        // Update Total Quantity
-        $stmt = $pdo->prepare("
-            INSERT INTO branch_inventory (branch_id, product_id, quantity)
-            VALUES (?, ?, ?)
-            ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)
-        ");
+        // Upsert batch: if a batch with same branch/product/batch_number exists, update its quantity; otherwise insert
+        $batchStmt = $pdo->prepare('SELECT id, quantity FROM drug_batches WHERE branch_id = ? AND product_id = ? AND batch_number = ? LIMIT 1');
+        $batchStmt->execute([$branchId, $productId, $batchNumber]);
+        $existingBatch = $batchStmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($existingBatch) {
+            $newQty = (int)$existingBatch['quantity'] + $quantity;
+            if ($supplierName !== null) {
+                $updateBatch = $pdo->prepare('UPDATE drug_batches SET quantity = ?, expiry_date = ?, status = ?, supplier_id = ?, supplier_name = ?, restock_status = ?, last_restock_date = ? WHERE id = ?');
+                $updateBatch->execute([$newQty, $expiryDate, 'ACTIVE', $supplierId, $supplierName, $restockStatus, $lastRestockDate, $existingBatch['id']]);
+            } else {
+                $updateBatch = $pdo->prepare('UPDATE drug_batches SET quantity = ?, expiry_date = ?, status = ?, restock_status = ?, last_restock_date = ? WHERE id = ?');
+                $updateBatch->execute([$newQty, $expiryDate, 'ACTIVE', $restockStatus, $lastRestockDate, $existingBatch['id']]);
+            }
+        } else {
+            if ($supplierName !== null) {
+                $ins = $pdo->prepare("INSERT INTO drug_batches (branch_id, product_id, batch_number, expiry_date, quantity, status, supplier_id, supplier_name, restock_status, last_restock_date) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?)");
+                $ins->execute([$branchId, $productId, $batchNumber, $expiryDate, $quantity, $supplierId, $supplierName, $restockStatus, $lastRestockDate]);
+            } else {
+                $ins = $pdo->prepare("INSERT INTO drug_batches (branch_id, product_id, batch_number, expiry_date, quantity, status, restock_status, last_restock_date) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)");
+                $ins->execute([$branchId, $productId, $batchNumber, $expiryDate, $quantity, $restockStatus, $lastRestockDate]);
+            }
+        }
+
+        // Update Total Quantity in branch_inventory (upsert)
+        $stmt = $pdo->prepare("INSERT INTO branch_inventory (branch_id, product_id, quantity) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)");
         $stmt->execute([$branchId, $productId, $quantity]);
 
         $pdo->commit();
@@ -286,7 +533,7 @@ function createTransfer() {
 
         $input = json_decode(file_get_contents('php://input'), true);
 
-        if (!$input) {
+        if (!$input || !is_array($input)) {
             http_response_code(400);
             echo json_encode(['error' => 'Invalid JSON payload']);
             return;
@@ -318,41 +565,23 @@ function createTransfer() {
         foreach ($items as $item) {
             if (!isset($item['productId']) || !isset($item['quantity']) || $item['quantity'] <= 0) {
                 http_response_code(400);
-                echo json_encode(['error' => 'Each item must have productId and positive quantity']);
+                echo json_encode(['error' => 'Invalid items data']);
                 return;
             }
         }
 
-        // Validate branches exist
-        $stmt = $pdo->prepare("SELECT id FROM branches WHERE id IN (?, ?)");
-        $stmt->execute([$sourceBranchId, $targetBranchId]);
-        $existingBranches = $stmt->fetchAll(PDO::FETCH_COLUMN);
-
-        if (count($existingBranches) < 2) {
-            http_response_code(400);
-            echo json_encode(['error' => 'One or both branches do not exist']);
-            return;
-        }
-
-        $transferId = 'TRANSFER-' . time();
-        $user = getCurrentUser();
-        $createdBy = $user['id'] ?? null;
-
         $itemsJson = json_encode($items);
-        if ($itemsJson === false) {
-            http_response_code(400);
-            echo json_encode(['error' => 'Invalid items data']);
-            return;
-        }
+        $createdBy = getCurrentUser()['id'] ?? null;
 
-        // Insert transfer without verification codes
-        $stmt = $pdo->prepare("
-            INSERT INTO stock_transfers
-            (id, from_branch_id, to_branch_id, products, status, notes, created_by)
-            VALUES (?, ?, ?, ?, 'IN_TRANSIT', ?, ?)
-        ");
+            // Generate transfer id (stock_transfers.id is a varchar primary key)
+            $transferId = 'TRANSFER-' . str_replace('.', '', uniqid('', true));
 
-        $result = $stmt->execute([$transferId, $sourceBranchId, $targetBranchId, $itemsJson, $notes, $createdBy]);
+            // Insert transfer (include id explicitly)
+            $stmt = $pdo->prepare("
+                INSERT INTO stock_transfers (id, from_branch_id, to_branch_id, products, status, notes, created_by, date_sent)
+                VALUES (?, ?, ?, ?, 'IN_TRANSIT', ?, ?, NOW())
+            ");
+            $result = $stmt->execute([$transferId, $sourceBranchId, $targetBranchId, $itemsJson, $notes, $createdBy]);
 
         if (!$result) {
             $error = $stmt->errorInfo();
@@ -360,6 +589,8 @@ function createTransfer() {
             echo json_encode(['error' => 'Failed to insert transfer', 'db_error' => $error]);
             return;
         }
+
+        // We generated the transfer id above; no auto-increment available
 
         // Return transfer data
         $transfer = [
@@ -387,6 +618,12 @@ function adjustStock() {
     try {
         authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_CONTROLLER']);
         $input = json_decode(file_get_contents('php://input'), true);
+
+        if (!$input || !is_array($input)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid JSON payload']);
+            return;
+        }
 
         $branchId = $input['branchId'] ?? '';
         $productId = $input['productId'] ?? '';
@@ -837,4 +1074,3 @@ function verifyTransfer() {
         echo json_encode(['error' => $e->getMessage()]);
     }
 }
-?>

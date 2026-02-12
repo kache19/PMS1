@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hopkins Medical Center - Invoice Preview</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        /* Header Section */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            padding-bottom: 20px;
+            border-bottom: 3px solid #4a90e2;
+            margin-bottom: 30px;
+        }
+        
+        .company-info {
+            flex: 1;
+        }
+        
+        .logo {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            margin-bottom: 10px;
+            font-size: 24px;
+        }
+        
+        .company-name {
+            font-size: 18px;
+            font-weight: bold;
+            color: #1a1a1a;
+            margin-bottom: 8px;
+        }
+        
+        .company-details {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.6;
+        }
+        
+        .company-details p {
+            margin-bottom: 4px;
+        }
+        
+        .client-info {
+            text-align: right;
+            font-size: 12px;
+            color: #333;
+        }
+        
+        .client-info p {
+            margin-bottom: 4px;
+        }
+        
+        /* Invoice Header Bar */
+        .invoice-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #4a90e2;
+            color: white;
+            padding: 15px 20px;
+            margin-bottom: 25px;
+            font-weight: bold;
+        }
+        
+        .invoice-title {
+            font-size: 24px;
+        }
+        
+        .invoice-meta {
+            text-align: right;
+            font-size: 13px;
+        }
+        
+        .invoice-meta div {
+            margin-bottom: 4px;
+        }
+        
+        /* Items Table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 25px;
+            font-size: 13px;
+        }
+        
+        thead {
+            background: #e8f0f9;
+            border-top: 2px solid #4a90e2;
+            border-bottom: 2px solid #4a90e2;
+        }
+        
+        th {
+            padding: 12px 10px;
+            text-align: left;
+            font-weight: bold;
+            color: #1a1a1a;
+        }
+        
+        th:nth-child(2),
+        th:nth-child(3),
+        th:nth-child(4) {
+            text-align: right;
+        }
+        
+        tbody tr {
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        tbody tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+        
+        td {
+            padding: 12px 10px;
+        }
+        
+        td:nth-child(2),
+        td:nth-child(3),
+        td:nth-child(4) {
+            text-align: right;
+        }
+        
+        td:nth-child(1) {
+            font-weight: 500;
+        }
+        
+        /* Totals Section */
+        .totals-section {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 30px;
+        }
+        
+        .totals-table {
+            width: 250px;
+            font-size: 13px;
+        }
+        
+        .totals-table .row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 20px;
+        }
+        
+        .totals-table .row.subtotal {
+            border-bottom: 1px solid #ddd;
+            color: #555;
+        }
+        
+        .totals-table .row.tax {
+            border-bottom: 2px solid #1a1a1a;
+            color: #555;
+        }
+        
+        .totals-table .row.total {
+            font-weight: bold;
+            font-size: 16px;
+            padding: 12px 20px;
+        }
+        
+        /* Payment Terms and Method */
+        .payment-section {
+            display: flex;
+            gap: 50px;
+            margin-bottom: 30px;
+        }
+        
+        .payment-column {
+            flex: 1;
+        }
+        
+        .payment-label {
+            color: #4a90e2;
+            font-weight: bold;
+            font-size: 12px;
+            margin-bottom: 8px;
+        }
+        
+        .payment-text {
+            font-size: 12px;
+            color: #333;
+            line-height: 1.6;
+        }
+        
+        /* Thank You Section */
+        .thank-you-section {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .thank-you-text {
+            font-size: 14px;
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .thank-you-section .company-name {
+            font-size: 16px;
+            font-weight: bold;
+            color: #1a1a1a;
+        }
+
+        /* Print Button */
+        .print-button {
+            background: #4a90e2;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            margin-top: 20px;
+        }
+        
+        .print-button:hover {
+            background: #357abd;
+        }
+        
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            
+            .container {
+                box-shadow: none;
+                padding: 0;
+            }
+            
+            .print-button {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header Section -->
+        <div class="header">
+            <div class="company-info">
+                <div class="logo">HMC</div>
+                <div class="company-name">Hopkins Medical Center</div>
+                <div class="company-details">
+                    <p><b>Address:</b> City, Main Street, 123</p>
+                    <p><b>Email:</b> Invoice@info.com</p>
+                </div>
+            </div>
+            <div class="client-info">
+                <p><b>Client:</b> Aga Khan Hospital</p>
+                <p><b>Address:</b> Dar es Salaam</p>
+                <p><b>Email:</b> contact@agakhan.tz</p>
+            </div>
+        </div>
+
+        <!-- Invoice Header Bar -->
+        <div class="invoice-header">
+            <div class="invoice-title">INVOICE</div>
+            <div class="invoice-meta">
+                <div>#10001</div>
+                <div>Date: 15.12.2024</div>
+            </div>
+        </div>
+
+        <!-- Items Table -->
+        <table>
+            <thead>
+                <tr>
+                    <th>DESCRIPTION</th>
+                    <th>QTY</th>
+                    <th>PRICE</th>
+                    <th>TOTAL</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>#01 Item/Service description</td>
+                    <td>1</td>
+                    <td>$105</td>
+                    <td>$105</td>
+                </tr>
+                <tr>
+                    <td>#02 Item/Service description</td>
+                    <td>2</td>
+                    <td>$75</td>
+                    <td>$145</td>
+                </tr>
+                <tr>
+                    <td>#03 Item/Service description</td>
+                    <td>1</td>
+                    <td>$35</td>
+                    <td>$35</td>
+                </tr>
+                <tr>
+                    <td>#04 Item/Service description</td>
+                    <td>1</td>
+                    <td>$85</td>
+                    <td>$85</td>
+                </tr>
+                <tr>
+                    <td>#05 Item/Service description</td>
+                    <td>2</td>
+                    <td>$55</td>
+                    <td>$105</td>
+                </tr>
+                <tr>
+                    <td>#06 Item/Service description</td>
+                    <td>1</td>
+                    <td>$205</td>
+                    <td>$205</td>
+                </tr>
+                <tr>
+                    <td>#07 Item/Service description</td>
+                    <td>1</td>
+                    <td>$425</td>
+                    <td>$425</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- Totals Section -->
+        <div class="totals-section">
+            <div class="totals-table">
+                <div class="row subtotal">
+                    <span>SUBTOTAL</span>
+                    <span>$1,755</span>
+                </div>
+                <div class="row tax">
+                    <span>TAX</span>
+                    <span>$0</span>
+                </div>
+                <div class="row total">
+                    <span>TOTAL</span>
+                    <span>$1,755</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Thank You Statement -->
+        <div class="thank-you-section">
+            <div class="thank-you-text">
+                Thank you for choosing MALENYA PHARMACEUTICAL COMPANY. We hope to work with you in near future.
+            </div>
+            <div class="company-name">
+                MALENYA PHARMACEUTICAL COMPANY
+            </div>
+        </div>
+
+        <!-- Print Button
+        <button class="print-button" onclick="window.print()">🖨️ Print Invoice</button> -->
+    </div>
+
+    <script>
+        // Show the print preview automatically when page loads
+        console.log('Invoice preview loaded. Click the Print button or use Ctrl+P to print.');
+    </script>
+</body>
+</html>

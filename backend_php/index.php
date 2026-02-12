@@ -1,12 +1,37 @@
 <?php
+// Load Composer vendor dependencies if available
+if (file_exists(__DIR__ . '/vendor/autoload.php')) {
+    require __DIR__ . '/vendor/autoload.php';
+}
+
 header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: https://malenyapharmacy.com');
+header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
+
+// Disable error display, but log errors
+ini_set('display_errors', '0');
+error_reporting(E_ALL);
 
 if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     exit(0);
 }
+
+// Custom error handler to return JSON errors
+set_error_handler(function($errno, $errstr, $errfile, $errline) {
+    error_log("PHP Error [$errno] $errstr in $errfile on line $errline");
+    http_response_code(500);
+    echo json_encode(['error' => 'Server error', 'message' => $errstr]);
+    exit;
+});
+
+// Custom exception handler
+set_exception_handler(function($exception) {
+    error_log("Uncaught exception: " . $exception->getMessage());
+    http_response_code(500);
+    echo json_encode(['error' => 'Internal server error', 'message' => $exception->getMessage()]);
+    exit;
+});
 
 try {
     require_once 'config/database.php';
@@ -44,6 +69,10 @@ $routes = [
     ['method' => 'POST', 'pattern' => '/auth/login', 'file' => 'routes/auth.php'],
     ['method' => 'POST', 'pattern' => '/auth/refresh', 'file' => 'routes/auth.php'],
     ['method' => 'POST', 'pattern' => '/auth/logout', 'file' => 'routes/auth.php'],
+    ['method' => 'POST', 'pattern' => '/auth/change-password', 'file' => 'routes/auth.php'],
+    ['method' => 'POST', 'pattern' => '/auth/forgot', 'file' => 'routes/auth.php'],
+    ['method' => 'POST', 'pattern' => '/auth/reset', 'file' => 'routes/auth.php'],
+    ['method' => 'POST', 'pattern' => '/admin/bulk-send-reset-links', 'file' => 'routes/admin.php'],
     ['method' => 'GET', 'pattern' => '/products', 'file' => 'routes/products.php'],
     ['method' => 'GET', 'pattern' => '/products/{id}', 'file' => 'routes/products.php'],
     ['method' => 'POST', 'pattern' => '/products', 'file' => 'routes/products.php'],
@@ -65,11 +94,13 @@ $routes = [
     ['method' => 'PATCH', 'pattern' => '/branches/{id}', 'file' => 'routes/branches.php'],
     ['method' => 'DELETE', 'pattern' => '/branches/{id}', 'file' => 'routes/branches.php'],
     ['method' => 'GET', 'pattern' => '/inventory', 'file' => 'routes/inventory.php'],
+        ['method' => 'GET', 'pattern' => '/inventory/export', 'file' => 'routes/inventory.php'],
+    ['method' => 'POST', 'pattern' => '/inventory/addStock', 'file' => 'routes/inventory.php'],
+    ['method' => 'POST', 'pattern' => '/inventory/add', 'file' => 'routes/inventory.php'],
     ['method' => 'GET', 'pattern' => '/inventory/{id}', 'file' => 'routes/inventory.php'],
     ['method' => 'GET', 'pattern' => '/stock', 'file' => 'routes/inventory.php'],
     ['method' => 'GET', 'pattern' => '/stock/{id}', 'file' => 'routes/inventory.php'],
     ['method' => 'POST', 'pattern' => '/inventory', 'file' => 'routes/inventory.php'],
-    ['method' => 'POST', 'pattern' => '/inventory/add', 'file' => 'routes/inventory.php'],
     ['method' => 'POST', 'pattern' => '/stock', 'file' => 'routes/inventory.php'],
     ['method' => 'POST', 'pattern' => '/stock/add', 'file' => 'routes/inventory.php'],
     ['method' => 'POST', 'pattern' => '/inventory/adjust', 'file' => 'routes/inventory.php'],
@@ -98,6 +129,10 @@ $routes = [
     ['method' => 'POST', 'pattern' => '/patients', 'file' => 'routes/patients.php'],
     ['method' => 'PUT', 'pattern' => '/patients/{id}', 'file' => 'routes/patients.php'],
     ['method' => 'GET', 'pattern' => '/settings', 'file' => 'routes/settings.php'],
+    // Backup routes
+    ['method' => 'GET', 'pattern' => '/backup', 'file' => 'routes/backup.php'],
+    ['method' => 'POST', 'pattern' => '/backup', 'file' => 'routes/backup.php'],
+    ['method' => 'DELETE', 'pattern' => '/backup', 'file' => 'routes/backup.php'],
     ['method' => 'POST', 'pattern' => '/settings', 'file' => 'routes/settings.php'],
     ['method' => 'PUT', 'pattern' => '/settings/{id}', 'file' => 'routes/settings.php'],
     ['method' => 'GET', 'pattern' => '/finance/invoices', 'file' => 'routes/finance.php'],
@@ -113,9 +148,13 @@ $routes = [
     ['method' => 'GET', 'pattern' => '/finance/summary', 'file' => 'routes/finance.php'],
     ['method' => 'GET', 'pattern' => '/disposals', 'file' => 'routes/disposals.php'],
     ['method' => 'PUT', 'pattern' => '/disposals/{id}', 'file' => 'routes/disposals.php'],
+    // Release requests (stock release to branches)
+    ['method' => 'GET', 'pattern' => '/releases', 'file' => 'routes/releases.php'],
+    ['method' => 'PUT', 'pattern' => '/releases/{id}', 'file' => 'routes/releases.php'],
     ['method' => 'GET', 'pattern' => '/requisitions', 'file' => 'routes/requisitions.php'],
     ['method' => 'GET', 'pattern' => '/requisitions/{id}', 'file' => 'routes/requisitions.php'],
     ['method' => 'POST', 'pattern' => '/requisitions', 'file' => 'routes/requisitions.php'],
+    ['method' => 'POST', 'pattern' => '/requisitions/{id}', 'file' => 'routes/requisitions.php'],
     ['method' => 'PUT', 'pattern' => '/requisitions/{id}', 'file' => 'routes/requisitions.php'],
     ['method' => 'PUT', 'pattern' => '/requisitions/{id}/status', 'file' => 'routes/requisitions.php'],
     ['method' => 'GET', 'pattern' => '/prescriptions', 'file' => 'routes/prescriptions.php'],
@@ -126,8 +165,22 @@ $routes = [
     ['method' => 'POST', 'pattern' => '/audit-logs', 'file' => 'routes/audit_logs.php'],
     ['method' => 'GET', 'pattern' => '/shipments', 'file' => 'routes/shipments.php'],
     ['method' => 'GET', 'pattern' => '/shipments/{id}', 'file' => 'routes/shipments.php'],
+    ['method' => 'POST', 'pattern' => '/shipments/customer-shipment', 'file' => 'api/shipments/customer-shipment.php'],
     ['method' => 'POST', 'pattern' => '/shipments', 'file' => 'routes/shipments.php'],
+    ['method' => 'POST', 'pattern' => '/shipments/create-direct', 'file' => 'routes/shipments.php'],
     ['method' => 'PUT', 'pattern' => '/shipments/{id}', 'file' => 'routes/shipments.php'],
+    // Entities routes - specific subpaths first
+    ['method' => 'GET', 'pattern' => '/entities/customers', 'file' => 'routes/entities.php'],
+    ['method' => 'GET', 'pattern' => '/entities/suppliers', 'file' => 'routes/entities.php'],
+    // Generic subpath route
+    ['method' => 'GET', 'pattern' => '/entities/{subpath}', 'file' => 'routes/entities.php'],
+    // General entities routes
+    ['method' => 'GET', 'pattern' => '/entities', 'file' => 'routes/entities.php'],
+    ['method' => 'GET', 'pattern' => '/entities/{id}', 'file' => 'routes/entities.php'],
+    ['method' => 'POST', 'pattern' => '/entities', 'file' => 'routes/entities.php'],
+    ['method' => 'POST', 'pattern' => '/entities/search', 'file' => 'routes/entities.php'],
+    ['method' => 'PUT', 'pattern' => '/entities/{id}', 'file' => 'routes/entities.php'],
+    ['method' => 'DELETE', 'pattern' => '/entities/{id}', 'file' => 'routes/entities.php'],
 ];
 
 try {

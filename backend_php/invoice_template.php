@@ -63,11 +63,13 @@ class InvoiceTemplate {
     }
 
     private function getInvoiceData($invoiceId) {
-        $stmt = $this->pdo->prepare("
-            SELECT i.*, b.name as branch_name, b.location as branch_location
-            FROM invoices i
-            LEFT JOIN branches b ON i.branch_id = b.id
-            WHERE i.id = ?
+        $stmt = $this->pdo->prepare("\
+            SELECT i.*, b.name as branch_name, b.location as branch_location, cb.name as customer_branch_name, e.name as customer_entity_name\
+            FROM invoices i\
+            LEFT JOIN branches b ON i.branch_id = b.id\
+            LEFT JOIN branches cb ON i.customer_name = cb.id\
+            LEFT JOIN entities e ON i.customer_name = e.id\
+            WHERE i.id = ?\
         ");
         $stmt->execute([$invoiceId]);
         return $stmt->fetch();
@@ -99,7 +101,8 @@ class InvoiceTemplate {
 
     private function generateHTML($invoice, $items, $payments) {
         $subtotal = 0;
-        $taxRate = (float)($this->companyInfo['tax_rate'] ?? 18) / 100; // Load from settings or default 18%
+        // Tax removed system-wide
+        $taxRate = 0.0;
         $taxAmount = 0;
         $total = 0;
 
@@ -109,8 +112,9 @@ class InvoiceTemplate {
             $subtotal += $itemTotal;
         }
 
-        $taxAmount = $subtotal * $taxRate;
-        $total = $subtotal + $taxAmount;
+        // No tax applied
+        $taxAmount = 0;
+        $total = $subtotal;
 
         $html = '
 <!DOCTYPE html>
@@ -401,15 +405,27 @@ class InvoiceTemplate {
 
             <div class="customer-info">
                 <div class="info-box">
-                    <h3>Bill To</h3>
+                    <h3>Bill To</h3>';
+        if (!empty($invoice['customer_branch_name'])) {
+            // It's a transfer between branches
+            $html .= '
+                    <div class="info-row">
+                        <span class="info-label">Transfer:</span>
+                        <span class="info-value">From ' . htmlspecialchars($invoice['branch_name'] ?? 'N/A') . ' to ' . htmlspecialchars($invoice['customer_branch_name']) . '</span>
+                    </div>';
+        } else {
+            // Regular customer
+            $html .= '
                     <div class="info-row">
                         <span class="info-label">Customer:</span>
-                        <span class="info-value">' . htmlspecialchars($invoice['customer_name']) . '</span>
+                        <span class="info-value">' . htmlspecialchars($invoice['customer_entity_name'] ?? $invoice['customer_name']) . '</span>
                     </div>
                     <div class="info-row">
                         <span class="info-label">Branch:</span>
                         <span class="info-value">' . htmlspecialchars($invoice['branch_name'] ?? 'N/A') . '</span>
-                    </div>
+                    </div>';
+        }
+        $html .= '
                 </div>
             </div>
         </div>
@@ -447,10 +463,6 @@ class InvoiceTemplate {
                 <tr>
                     <td>Subtotal:</td>
                     <td class="amount">TZS ' . number_format($subtotal, 2) . '</td>
-                </tr>
-                <tr>
-                    <td>VAT (' . htmlspecialchars($this->companyInfo['tax_rate']) . '%):</td>
-                    <td class="amount">TZS ' . number_format($taxAmount, 2) . '</td>
                 </tr>
                 <tr class="total-row">
                     <td>Total:</td>

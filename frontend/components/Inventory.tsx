@@ -30,11 +30,13 @@ import {
   Layers,
   BarChart3,
   Download,
+  FileText,
   Copy as DuplicateIcon
 } from 'lucide-react';
 import { StockTransfer, Product, BranchInventoryItem, BatchStatus, StockRequisition, Staff, Branch, Sale } from '../types';
 import { useNotifications } from './NotificationContext';
 import { api } from '../services/api';
+import { exportToExcel, exportToPDF } from '../services/exportService';
 
 // Add safe format helpers to prevent calling toLocaleString on undefined
 const fmtNumber = (v?: number | null) => {
@@ -224,6 +226,69 @@ const Inventory: React.FC<InventoryProps> = ({
      }, 2500);
   };
 
+  // Export inventory to Excel
+  const handleExportExcel = () => {
+    try {
+      const exportData = filteredInventory.map(item => {
+        const product = products.find(p => p.id === item.productId);
+        return {
+          'Product ID': item.productId,
+          'Product Name': product?.name || 'Unknown',
+          'Category': product?.category || 'General',
+          'Quantity': item.quantity,
+          'Unit': product?.unit || 'Box',
+          'Cost Price': product?.costPrice || 0,
+          'Selling Price': product?.price || 0,
+          'Min Stock': product?.minStockLevel || 0,
+        };
+      });
+
+      exportToExcel(exportData, `Inventory_${new Date().toISOString().split('T')[0]}`);
+      showSuccess('Export Completed', 'Inventory data exported to Excel successfully.');
+    } catch (error) {
+      console.error('Export failed:', error);
+      showError('Export Failed', 'Failed to export inventory data. Please try again.');
+    }
+  };
+
+  // Export inventory to PDF
+  const handleExportPDF = () => {
+    try {
+      const exportData = filteredInventory.map(item => {
+        const product = products.find(p => p.id === item.productId);
+        return {
+          productId: item.productId,
+          name: product?.name || 'Unknown',
+          category: product?.category || 'General',
+          quantity: item.quantity,
+          price: product?.price || 0,
+        };
+      });
+
+      const columns = [
+        { key: 'productId', header: 'ID' },
+        { key: 'name', header: 'Product' },
+        { key: 'category', header: 'Category' },
+        { key: 'quantity', header: 'Qty' },
+        { key: 'price', header: 'Price' }
+      ];
+
+      const totalValue = filteredInventory.reduce((sum, item) => {
+        const product = products.find(p => p.id === item.productId);
+        return sum + (item.quantity * (product?.price || 0));
+      }, 0);
+
+      exportToPDF(exportData, 'Inventory Report', columns, {
+        totalItems: filteredInventory.length,
+        totalValue: totalValue
+      });
+      showSuccess('Export Completed', 'Inventory report exported to PDF successfully.');
+    } catch (error) {
+      console.error('PDF export failed:', error);
+      showError('Export Failed', 'Failed to export inventory PDF. Please try again.');
+    }
+  };
+
   const handleAddStock = async () => {
      const qty = parseInt(newStock.quantity);
      const isNew = addMode === 'NEW';
@@ -282,7 +347,7 @@ const Inventory: React.FC<InventoryProps> = ({
 
      // prepare batch data used for both local update and server
      const batchNumber = newStock.batchNumber?.trim() || `BATCH-${Date.now()}`;
-     const expiryDate = newStock.expiryDate || new Date(Date.now() + 365*24*60*60*1000).toISOString().split('T')[0];
+     const expiryDate = newStock.expiryDate || '';
      const payload = {
          branchId: currentBranchId,
          productId,
@@ -348,7 +413,7 @@ const Inventory: React.FC<InventoryProps> = ({
          // detect common HTTP 404 from fetch/XHR wrappers (may vary by implementation)
          const status = (error as any)?.status || (error as any)?.response?.status || null;
          if (status === 404) {
-             showError("API Route Not Found", "POST /stock returned 404. Check backend route or base URL.");
+             showError("API Route Not Found", "POST /inventory/addStock returned 404. Check backend route or base URL.");
          } else {
              showError("Failed to Add Stock", `Server error: ${(error as Error).message || 'Unknown error'}`);
          }
@@ -856,6 +921,20 @@ const Inventory: React.FC<InventoryProps> = ({
                  >
                    <Plus size={20} /> Add New Product
                  </button>
+                  <button
+                    onClick={handleExportPDF}
+                    className="flex items-center gap-2 px-5 py-3 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 font-bold shadow-lg"
+                    title="Export to PDF"
+                  >
+                    <FileText size={20} /> Export PDF
+                  </button>
+                  <button
+                    onClick={handleExportExcel}
+                    className="flex items-center gap-2 px-5 py-3 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 font-bold shadow-lg"
+                    title="Export to Excel"
+                  >
+                    <BarChart3 size={20} /> Export Excel
+                  </button>
                  <div className="relative">
                    <button
                      onClick={() => setShowTransferModal(true)}

@@ -6,10 +6,15 @@ global $pdo;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $id = $_GET['id'] ?? null;
+$action = $_GET['action'] ?? null;
 
 switch ($method) {
     case 'GET':
-        getSettings();
+        if ($action === 'login-trackers') {
+            getLoginTrackers();
+        } else {
+            getSettings();
+        }
         break;
     case 'POST':
         if (isset($_GET['action']) && $_GET['action'] === 'upload-logo') {
@@ -26,6 +31,53 @@ switch ($method) {
     default:
         http_response_code(405);
         echo json_encode(['error' => 'Method not allowed']);
+}
+
+function getLoginTrackers() {
+    global $pdo;
+
+    try {
+        $user = getCurrentUser();
+        $userRole = $user['role'] ?? '';
+        $userBranchId = $user['branch_id'] ?? null;
+        
+        // Authorization: SUPER_ADMIN can see all, others see their branch only
+        if ($userRole !== 'SUPER_ADMIN' && $userRole !== 'BRANCH_MANAGER') {
+            http_response_code(403);
+            echo json_encode(['error' => 'Unauthorized to view login trackers']);
+            return;
+        }
+        
+        // Get branch filter from query param
+        $branchFilter = $_GET['branch'] ?? null;
+        $daysFilter = intval($_GET['days'] ?? 30);
+        
+        // Build query
+        $query = 'SELECT id, user_id as userId, user_name as userName, branch_id as branchId, branch_name as branchName, ip_address as ipAddress, device_info as deviceInfo, login_time as loginTime, logout_time as logoutTime, session_duration_minutes as sessionDurationMinutes, status FROM user_login_trackers WHERE login_time >= DATE_SUB(NOW(), INTERVAL ? DAY)';
+        $params = [$daysFilter];
+        
+        // Apply branch filter
+        if ($branchFilter) {
+            $query .= ' AND branch_id = ?';
+            $params[] = $branchFilter;
+        } elseif ($userRole === 'BRANCH_MANAGER') {
+            // Branch managers see only their branch's logins
+            $query .= ' AND branch_id = ?';
+            $params[] = $userBranchId;
+        }
+        
+        $query .= ' ORDER BY login_time DESC LIMIT 1000';
+        
+        $stmt = $pdo->prepare($query);
+        $stmt->execute($params);
+        $trackers = $stmt->fetchAll();
+        
+        echo json_encode($trackers);
+    } catch (Exception $e) {
+        error_log('Get login trackers error: ' . $e->getMessage());
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
 }
 
 function getSettings() {

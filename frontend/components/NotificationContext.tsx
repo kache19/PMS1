@@ -9,6 +9,7 @@ export interface Notification {
   title: string;
   message?: string;
   duration?: number;
+  timestamp: number;
 }
 
 interface NotificationContextType {
@@ -42,7 +43,7 @@ export const NotificationProvider: React.FC<NotificationProviderProps> = ({ chil
     const id = Math.random().toString(36).substr(2, 9);
     const newNotification: Notification = {
       id,
-      duration: 5000,
+      duration: notification.duration || (notification.type === 'success' ? 1500 : 5000),
       ...notification,
     };
 
@@ -51,7 +52,7 @@ export const NotificationProvider: React.FC<NotificationProviderProps> = ({ chil
     // Auto remove after duration
     if (newNotification.duration && newNotification.duration > 0) {
       setTimeout(() => {
-        removeNotification(id);
+        setNotifications(current => current.filter(n => n.id !== id));
       }, newNotification.duration);
     }
   }, []);
@@ -138,6 +139,7 @@ export const NotificationToast: React.FC<NotificationToastProps> = ({ notificati
       <button
         onClick={() => onClose(notification.id)}
         className="text-slate-400 hover:text-slate-600 transition-colors"
+        title="Close notification"
       >
         <X size={16} />
       </button>

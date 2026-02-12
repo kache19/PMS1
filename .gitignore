@@ -1,0 +1,40 @@
+# Global ignore rules for this mixed PHP + Vite project
+
+# Node / Vite
+node_modules/
+**/node_modules/
+.vite/
+**/.vite/
+frontend/dist/
+dist/
+build/
+
+# Build artifacts copied to web root
+assets/*.js
+assets/*.css
+
+# Logs and runtime files
+*.log
+error_log
+
+# Environment files
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Archives and backups
+*.zip
+*.tar.gz
+*.bak
+
+# PHP uploads/cache
+backend_php/uploads/
+backend_php/cache/
+backend_php/temp/

@@ -318,17 +318,47 @@ function deleteProduct($id) {
 
     try {
         authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_CONTROLLER']);
+
+        // Start transaction to ensure all deletions succeed or fail together
+        $pdo->beginTransaction();
+
+        // Delete related records first to avoid foreign key constraints
+        $stmt = $pdo->prepare('DELETE FROM sale_items WHERE product_id = ?');
+        $stmt->execute([$id]);
+
+        $stmt = $pdo->prepare('DELETE FROM prescription_items WHERE product_id = ?');
+        $stmt->execute([$id]);
+
+        $stmt = $pdo->prepare('DELETE FROM stock_transfer_items WHERE product_id = ?');
+        $stmt->execute([$id]);
+
+        $stmt = $pdo->prepare('DELETE FROM stock_requisition_items WHERE product_id = ?');
+        $stmt->execute([$id]);
+
+        $stmt = $pdo->prepare('DELETE FROM inventory_adjustments WHERE product_id = ?');
+        $stmt->execute([$id]);
+
+        $stmt = $pdo->prepare('DELETE FROM drug_batches WHERE product_id = ?');
+        $stmt->execute([$id]);
+
+        $stmt = $pdo->prepare('DELETE FROM branch_inventory WHERE product_id = ?');
+        $stmt->execute([$id]);
+
+        // Finally delete the product
         $stmt = $pdo->prepare('DELETE FROM products WHERE id = ?');
         $stmt->execute([$id]);
 
         if ($stmt->rowCount() === 0) {
+            $pdo->rollBack();
             http_response_code(404);
             echo json_encode(['error' => 'Product not found']);
             return;
         }
 
+        $pdo->commit();
         http_response_code(204);
     } catch (Exception $e) {
+        $pdo->rollBack();
         error_log('Delete product error: ' . $e->getMessage());
         http_response_code(500);
         echo json_encode(['error' => $e->getMessage()]);

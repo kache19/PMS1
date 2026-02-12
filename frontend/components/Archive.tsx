@@ -18,14 +18,16 @@ interface ArchiveProps {
   expenses: Expense[];
   onRestore: (type: 'invoice' | 'expense', id: string) => void;
   onAutoArchive: (months: number) => void;
+  onRefresh?: () => void;
 }
 
-const ArchiveManager: React.FC<ArchiveProps> = ({ 
-  currentBranchId, 
-  invoices = [], 
-  expenses = [], 
-  onRestore, 
-  onAutoArchive 
+const ArchiveManager: React.FC<ArchiveProps> = ({
+  currentBranchId,
+  invoices = [],
+  expenses = [],
+  onRestore,
+  onAutoArchive,
+  onRefresh
 }) => {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [activeTab, setActiveTab] = useState<'invoices' | 'expenses'>('invoices');
@@ -45,6 +47,14 @@ const ArchiveManager: React.FC<ArchiveProps> = ({
     })();
     return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    if (!onRefresh) return;
+    const interval = setInterval(() => {
+      onRefresh();
+    }, 30000); // Poll every 30 seconds
+    return () => clearInterval(interval);
+  }, [onRefresh]);
 
   const currentBranch = branches.find(b => b.id === currentBranchId);
   const isHeadOffice = currentBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';

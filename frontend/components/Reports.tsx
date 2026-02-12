@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import {
   FileText,
   TrendingUp,
@@ -17,10 +18,15 @@ import {
   X,
   User,
   Building,
-  BarChart3
+  BarChart3,
+  Eye
 } from 'lucide-react';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, LineChart, Line, XAxis, YAxis, CartesianGrid } from 'recharts';
 import { api } from '../services/api';
-import { AuditLog, BranchInventoryItem, Sale, Expense, Branch, Product } from '../types';
+import { AuditLog, BranchInventoryItem, Sale, Expense, Branch, Product, Invoice, CartItem } from '../types';
+import { openCustomPrint } from '../services/printUtils';
+import ReportPrintTemplate from './ReportPrintTemplate';
+import ModernInvoicePrintTemplate from './ModernInvoicePrintTemplate';
 
 const COLORS = ['#0f766e', '#14b8a6', '#f59e0b', '#f43f5e', '#64748b'];
 
@@ -31,22 +37,36 @@ interface ReportsProps {
   expenses: Expense[];
 }
 
-const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, expenses }) => {
-  const [activeTab, setActiveTab] = useState<'finance' | 'inventory' | 'audit' | 'activity'>('finance');
-  const [auditFilter, setAuditFilter] = useState('');
-  const [branches, setBranches] = useState<Branch[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
-  const [sessions, setSessions] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
-  const [realTimeData, setRealTimeData] = useState({
-    activeUsers: 0,
-    pendingApprovals: 0,
-    systemAlerts: 0,
-    recentTransactions: 0
-  });
+const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInventory, sales: propSales, expenses: propExpenses }) => {
+    const [activeTab, setActiveTab] = useState<'finance' | 'inventory' | 'audit' | 'activity' | 'sales'>('finance');
+   const [auditFilter, setAuditFilter] = useState('');
+   const [branches, setBranches] = useState<Branch[]>([]);
+   const [products, setProducts] = useState<Product[]>([]);
+   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+   const [sessions, setSessions] = useState<any[]>([]);
+   const [sales, setSales] = useState<Sale[]>(propSales);
+   const [invoices, setInvoices] = useState<Invoice[]>([]);
+   const [inventory, setInventory] = useState<Record<string, BranchInventoryItem[]>>(propInventory);
+   const [expenses, setExpenses] = useState<Expense[]>(propExpenses);
+   const [settings, setSettings] = useState<any[]>([]);
+   const [entities, setEntities] = useState<any[]>([]);
+   const [isLoading, setIsLoading] = useState(true);
+   const [error, setError] = useState<string | null>(null);
+   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+   const [realTimeData, setRealTimeData] = useState({
+     activeUsers: 0,
+     pendingApprovals: 0,
+     systemAlerts: 0,
+     recentTransactions: 0
+   });
+
+   // Sales Report State
+   const [salesStartDate, setSalesStartDate] = useState('');
+   const [salesEndDate, setSalesEndDate] = useState('');
+   const [salesSortBy, setSalesSortBy] = useState<'date' | 'name' | 'time'>('date');
+   const [salesSortOrder, setSalesSortOrder] = useState<'asc' | 'desc'>('desc');
+   const [showSalesPreview, setShowSalesPreview] = useState(false);
+   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
 
   // Load branches, products, and audit logs
   useEffect(() => {
@@ -54,17 +74,29 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
     const loadData = async () => {
       try {
         setError(null);
-        const [branchesData, productsData, auditData, sessionsData] = await Promise.all([
+        const [branchesData, productsData, auditData, sessionsData, salesData, inventoryData, expensesData, invoicesData, settingsData, entitiesData] = await Promise.all([
           api.getBranches(),
           api.getProducts(),
           api.getAuditLogs(),
-          api.getSessions()
+          api.getSessions(),
+          api.getSales(),
+          api.getInventory(),
+          api.getExpenses(),
+          api.getInvoices(),
+          api.getSettings(),
+          api.getEntities()
         ]);
         if (mounted) {
           setBranches(branchesData || []);
           setProducts(productsData || []);
           setAuditLogs(auditData || []);
           setSessions(sessionsData || []);
+          setSales(salesData || []);
+          setInvoices(invoicesData || []);
+          setInventory(inventoryData || {});
+          setExpenses(expensesData || []);
+          setSettings(settingsData || []);
+          setEntities(entitiesData || []);
           setLastUpdate(new Date());
 
           // Calculate real-time metrics
@@ -96,6 +128,9 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
           setProducts([]);
           setAuditLogs([]);
           setSessions([]);
+          setSales([]);
+          setInventory({});
+          setExpenses([]);
         }
       } finally {
         if (mounted) {
@@ -128,6 +163,53 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
     () => isHeadOffice ? sales : sales.filter(s => s.branchId === currentBranchId),
     [sales, currentBranchId, isHeadOffice]
   );
+
+  // Filter invoices by branch
+  const filteredInvoices = useMemo(
+    () => isHeadOffice ? invoices : invoices.filter(inv => inv.branchId === currentBranchId),
+    [invoices, currentBranchId, isHeadOffice]
+  );
+
+  // Filtered and sorted sales for report
+  const reportSales = useMemo(() => {
+    let filtered = filteredSales;
+
+    // Date filtering
+    if (salesStartDate) {
+      filtered = filtered.filter(s => new Date(s.date) >= new Date(salesStartDate));
+    }
+    if (salesEndDate) {
+      filtered = filtered.filter(s => new Date(s.date) <= new Date(salesEndDate + 'T23:59:59'));
+    }
+
+    // Sorting
+    filtered.sort((a, b) => {
+      let aVal: any, bVal: any;
+      switch (salesSortBy) {
+        case 'date':
+          aVal = new Date(a.date);
+          bVal = new Date(b.date);
+          break;
+        case 'name':
+          aVal = a.customerName || '';
+          bVal = b.customerName || '';
+          break;
+        case 'time':
+          aVal = new Date(a.date).getTime();
+          bVal = new Date(b.date).getTime();
+          break;
+        default:
+          aVal = a.date;
+          bVal = b.date;
+      }
+
+      if (aVal < bVal) return salesSortOrder === 'asc' ? -1 : 1;
+      if (aVal > bVal) return salesSortOrder === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    return filtered;
+  }, [filteredSales, salesStartDate, salesEndDate, salesSortBy, salesSortOrder]);
 
   const filteredExpenses = useMemo(
     () => isHeadOffice ? expenses : expenses.filter(e => e.branchId === currentBranchId),
@@ -214,9 +296,9 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
     });
   }, [filteredSales]);
 
-  // Advanced Inventory Analytics
+  // Advanced Inventory Analytics - only show active stock (baseStock), limit to current branch
   const inventoryAnalytics = useMemo(() => {
-    const branchesToCheck = isHeadOffice ? Object.keys(inventory) : [currentBranchId];
+    const branchesToCheck = [currentBranchId];
     let totalValuation = 0;
     let totalStock = 0;
     let lowStockItems = 0;
@@ -230,31 +312,37 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
         if (product) {
           const costPrice = (product as any).costPrice || product.price || 0;
           const sellingPrice = i.customPrice || product.price || 0;
-          const qty = typeof i.quantity === 'number' ? i.quantity : 0;
-          const value = qty * costPrice;
+          // Calculate baseStock (active batches only) - never count pending incoming
+          const baseStock = i.batches
+            ? i.batches.filter((b: any) => b.status === 'ACTIVE').reduce((sum: number, b: any) => sum + b.quantity, 0)
+            : 0;
+          const value = baseStock * costPrice;
 
           totalValuation += value;
-          totalStock += qty;
+          totalStock += baseStock;
 
-          if (qty === 0) outOfStockItems++;
-          else if (qty <= (product.minStockLevel || 10)) lowStockItems++;
+          if (baseStock === 0) outOfStockItems++;
+          else if (baseStock <= (product.minStockLevel || 10)) lowStockItems++;
 
           // Calculate stock turnover (simplified - would need sales data)
           const turnoverRate = 0; // TODO: calculate from sales history
 
-          productAnalytics.push({
-            productId: product.id,
-            name: product.name,
-            category: product.category,
-            quantity: qty,
-            value: value,
-            costPrice,
-            sellingPrice,
-            margin: sellingPrice > 0 ? ((sellingPrice - costPrice) / sellingPrice) * 100 : 0,
-            turnoverRate,
-            stockStatus: qty === 0 ? 'out_of_stock' : qty <= (product.minStockLevel || 10) ? 'low_stock' : 'normal',
-            batches: i.batches?.length || 0
-          });
+          // Only include products with active stock > 0 in analytics
+          if (baseStock > 0) {
+            productAnalytics.push({
+              productId: product.id,
+              name: product.name,
+              category: product.category,
+              quantity: baseStock,
+              value: value,
+              costPrice,
+              sellingPrice,
+              margin: sellingPrice > 0 ? ((sellingPrice - costPrice) / sellingPrice) * 100 : 0,
+              turnoverRate,
+              stockStatus: baseStock === 0 ? 'out_of_stock' : baseStock <= (product.minStockLevel || 10) ? 'low_stock' : 'normal',
+              batches: i.batches?.length || 0
+            });
+          }
         }
       });
     });
@@ -288,11 +376,11 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
       lowStockItems,
       outOfStockItems,
       productAnalytics,
-      abcAnalysis,
+      abcAnalysis: abcAnalysis.filter(item => item.value > 0),
       turnoverAnalysis,
       stockEfficiency: totalStock > 0 ? (totalValuation / totalStock) : 0
     };
-  }, [inventory, currentBranchId, isHeadOffice, products]);
+  }, [inventory, currentBranchId, products]);
 
   // Filter Audit Logs
   const filteredAuditLogs = useMemo(() => {
@@ -329,6 +417,26 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
       severity: log.severity
     }));
   }, [auditLogs, branches]);
+
+  // Sales by Category Data
+  const categorySales = useMemo(() => {
+    if (!filteredSales.length || !products.length) return [];
+
+    const categoryMap: Record<string, number> = {};
+    filteredSales.forEach(sale => {
+      sale.items.forEach(item => {
+        const product = products.find(p => p.id === item.productId);
+        if (product) {
+          const category = product.category;
+          categoryMap[category] = (categoryMap[category] || 0) + (item.price * item.quantity);
+        }
+      });
+    });
+
+    return Object.entries(categoryMap)
+      .map(([category, value]) => ({ name: category, value }))
+      .sort((a, b) => b.value - a.value); // Sort by value descending
+  }, [filteredSales, products]);
 
   // Export function
   const downloadCSV = (data: any[], filename: string) => {
@@ -368,9 +476,135 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
     }
   };
 
+  // Print sales report
+  // Helper function to get system settings
+  const getSetting = (key: string, defaultValue: string = '') => {
+    const setting = settings.find(s => s.settingKey === key);
+    return setting?.settingValue || defaultValue;
+  };
+
+  // Helper function to get customer entity details
+  const getCustomerInfo = (customerName: string, customerEmail: string = '') => {
+    const customer = entities.find(e => 
+      e.id === customerName || 
+      e.name === customerName
+    );
+    
+    if (customer) {
+      return {
+        name: customer.name || customerName || 'Walk-in Customer',
+        address: customer.address || '',
+        email: customer.email || customerEmail || '',
+        phone: customer.phone || ''
+      };
+    }
+    
+    return {
+      name: customerName || 'Walk-in Customer',
+      address: '',
+      email: customerEmail || '',
+      phone: ''
+    };
+  };
+
+  const handlePrintSalesReport = () => {
+    const reportData = {
+      title: 'Sales Report',
+      branchName,
+      dateRange: salesStartDate && salesEndDate ? `${salesStartDate} to ${salesEndDate}` : 'All Time',
+      data: reportSales.map(s => ({
+        'Sale ID': s.id,
+        'Date': new Date(s.date).toLocaleDateString(),
+        'Time': new Date(s.date).toLocaleTimeString(),
+        'Customer': s.customerName || 'Walk-in',
+        'Amount': s.totalAmount.toLocaleString() + ' TZS',
+        'Profit': s.profit.toLocaleString() + ' TZS',
+        'Payment Method': s.paymentMethod
+      })),
+      summary: {
+        'Total Sales': reportSales.length.toString(),
+        'Total Revenue': reportSales.reduce((sum, s) => sum + s.totalAmount, 0).toLocaleString() + ' TZS',
+        'Total Profit': reportSales.reduce((sum, s) => sum + s.profit, 0).toLocaleString() + ' TZS'
+      }
+    };
+    const companySettings = {
+      companyName: getSetting('companyName', 'PMS Pharmacy'),
+      tinNumber: getSetting('tinNumber', '123-456-789'),
+      address: getSetting('address', 'Bagamoyo Road, Dar es Salaam, Tanzania'),
+      phone: getSetting('phone', '+255 700 123 456'),
+      email: getSetting('email', 'info@pms-pharmacy.tz'),
+      logo: getSetting('logo', '/backend_php/uploads/logos/logo.png')
+    };
+    const html = renderToStaticMarkup(
+      <ReportPrintTemplate report={reportData} companySettings={companySettings} />
+    );
+    openCustomPrint(html, 'Sales Report Print');
+  };
+
+  // Print individual invoice in modern style
+  const handlePrintInvoice = (invoice: Invoice) => {
+    const customerInfo = getCustomerInfo(invoice.customerName, invoice.customerEmail);
+
+    const invoiceData = {
+      id: invoice.id,
+      dateIssued: invoice.dateIssued || '',
+      client: {
+        name: customerInfo.name,
+        address: customerInfo.address,
+        email: customerInfo.email
+      },
+      items: (invoice.items || []).map((item: CartItem) => ({
+        description: item.name || item.productName || 'Item',
+        quantity: item.quantity,
+        price: item.price,
+        total: item.price * item.quantity
+      })),
+      subtotal: invoice.totalAmount || 0,
+      tax: 0, // Tax not separately tracked in Invoice
+      total: invoice.totalAmount || 0,
+      paymentTerms: invoice.description || 'Payment due upon receipt.',
+      paymentMethod: invoice.paymentMethod || 'Wire Transfer',
+      qrCodeUrl: ''
+    };
+
+    const companySettings = {
+      companyName: getSetting('companyName', 'PMS Pharmacy Ltd'),
+      logo: getSetting('logo', '/backend_php/uploads/logos/logo.png'),
+      address: getSetting('address', 'Bagamoyo Road, Dar es Salaam, Tanzania')
+    };
+
+    const html = renderToStaticMarkup(
+      <ModernInvoicePrintTemplate invoice={invoiceData} companySettings={companySettings} />
+    );
+    openCustomPrint(html, 'Invoice Print');
+  };
+
   const handleExport = (format: string) => {
     if (format === 'PDF') {
-      window.print();
+      if (activeTab === 'sales') {
+        handlePrintSalesReport();
+        return;
+      }
+      const reportData = {
+        title: `${activeTab.charAt(0).toUpperCase() + activeTab.slice(1)} Report`,
+        branchName,
+        dateRange: 'Last 30 days',
+        data: [],
+        summary: {}
+      };
+      const companySettings = {
+        companyName: getSetting('companyName', 'PMS Pharmacy'),
+        tinNumber: getSetting('tinNumber', '123-456-789'),
+        address: getSetting('address', 'Bagamoyo Road, Dar es Salaam, Tanzania'),
+        phone: getSetting('phone', '+255 700 123 456'),
+        email: getSetting('email', 'info@pms-pharmacy.tz'),
+        logo: getSetting('logo', '/backend_php/uploads/logos/logo.png')
+      };
+      // Render ReportPrintTemplate to HTML string
+      const html = renderToStaticMarkup(
+        <ReportPrintTemplate report={reportData} companySettings={companySettings} />
+      );
+      openCustomPrint(html, 'Report Print');
       return;
     }
 
@@ -401,7 +635,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
           });
         }
       } else if (activeTab === 'inventory') {
-        const branchesToExport = isHeadOffice ? Object.keys(inventory) : [currentBranchId];
+        const branchesToExport = [currentBranchId];
 
         branchesToExport.forEach(bId => {
           const bName = branches.find(b => b.id === bId)?.name || bId;
@@ -409,21 +643,54 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
           items.forEach(item => {
             const product = products.find(p => p.id === item.productId);
             if (product) {
-              dataToExport.push({
-                Branch: bName,
-                Product_ID: product.id,
-                Product_Name: product.name,
-                Generic_Name: product.genericName,
-                Category: product.category,
-                Quantity: item.quantity,
-                Unit: product.unit,
-                Selling_Price: item.customPrice || product.price,
-                Total_Value: item.quantity * (item.customPrice || product.price),
-                Batches: item.batches.map(b => `${b.batchNumber}(${b.expiryDate})`).join('; ')
-              });
+              // Calculate baseStock (active batches only)
+              const baseStock = item.batches
+                ? item.batches.filter((b: any) => b.status === 'ACTIVE').reduce((sum: number, b: any) => sum + b.quantity, 0)
+                : 0;
+              
+              // Only export items with active stock > 0
+              if (baseStock > 0) {
+                dataToExport.push({
+                  Branch: bName,
+                  Product_ID: product.id,
+                  Product_Name: product.name,
+                  Generic_Name: product.genericName,
+                  Category: product.category,
+                  Active_Stock: baseStock,
+                  Unit: product.unit,
+                  Selling_Price: item.customPrice || product.price,
+                  Total_Value: baseStock * (item.customPrice || product.price),
+                  Cost_Price: product.costPrice,
+                  Batches: item.batches.map((b: any) => `${b.batchNumber}(${b.expiryDate})`).join('; ')
+                });
+              }
             }
           });
         });
+      } else if (activeTab === 'sales') {
+        dataToExport = reportSales.map((s: Sale) => ({
+          ID: s.id,
+          Date: s.date,
+          Time: new Date(s.date).toLocaleTimeString(),
+          Customer_Name: s.customerName || '',
+          Total_Amount: s.totalAmount,
+          Profit: s.profit,
+          Payment_Method: s.paymentMethod,
+          Branch: branches.find(b => b.id === s.branchId)?.name || s.branchId
+        }));
+
+        // Append summary row
+        if (dataToExport.length > 0) {
+          dataToExport.push({});
+          const totalAmount = reportSales.reduce((sum, s) => sum + s.totalAmount, 0);
+          const totalProfit = reportSales.reduce((sum, s) => sum + s.profit, 0);
+          dataToExport.push({
+            ID: 'TOTAL_SUMMARY',
+            Total_Amount: totalAmount,
+            Profit: totalProfit,
+            Branch: isHeadOffice ? 'All Branches' : branchName
+          });
+        }
       } else if (activeTab === 'audit') {
         dataToExport = filteredAuditLogs.map(log => ({
           ID: log.id,
@@ -509,6 +776,12 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
           <Activity size={16} /> Live Activity
         </button>
         <button
+          onClick={() => setActiveTab('sales')}
+          className={`px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${activeTab === 'sales' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+        >
+          <FileBarChart size={16} /> Sales Report
+        </button>
+        <button
           onClick={() => setActiveTab('audit')}
           className={`px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${activeTab === 'audit' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
         >
@@ -526,7 +799,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
                 <p className="text-sm font-medium text-slate-500 mb-1">Total Revenue</p>
-                <h3 className="text-3xl font-bold text-slate-800">
+                <h3 className="text-2xl md:text-3xl font-bold text-slate-800 truncate">
                   {(financeStats.revenue / 1000000).toFixed(1)}M
                   <span className="text-sm text-slate-400 font-normal"> TZS</span>
                 </h3>
@@ -537,7 +810,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
 
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
                 <p className="text-sm font-medium text-slate-500 mb-1">Net Profit</p>
-                <h3 className="text-3xl font-bold text-slate-800">
+                <h3 className="text-2xl md:text-3xl font-bold text-slate-800 truncate">
                   {(financeStats.netProfit / 1000000).toFixed(1)}M
                   <span className="text-sm text-slate-400 font-normal"> TZS</span>
                 </h3>
@@ -548,7 +821,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
 
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
                 <p className="text-sm font-medium text-slate-500 mb-1">Gross Margin</p>
-                <h3 className="text-3xl font-bold text-slate-800">
+                <h3 className="text-2xl md:text-3xl font-bold text-slate-800 truncate">
                   {financeStats.grossMargin.toFixed(1)}%
                 </h3>
                 <div className="mt-2 text-xs text-emerald-600 font-bold bg-emerald-50 inline-block px-2 py-1 rounded">
@@ -558,7 +831,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
 
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
                 <p className="text-sm font-medium text-slate-500 mb-1">Op. Expenses</p>
-                <h3 className="text-3xl font-bold text-slate-800">
+                <h3 className="text-2xl md:text-3xl font-bold text-slate-800 truncate">
                   {(financeStats.expenses / 1000000).toFixed(1)}M
                   <span className="text-sm text-slate-400 font-normal"> TZS</span>
                 </h3>
@@ -585,26 +858,112 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
               {/* Revenue Trend */}
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 break-inside-avoid">
                 <h4 className="font-bold text-slate-800 mb-6">Revenue Trend (7 Days)</h4>
-                <div className="h-72 bg-slate-50 rounded-lg flex items-center justify-center">
-                  <div className="text-center text-slate-500">
-                    <TrendingUp size={48} className="mx-auto mb-4 opacity-50" />
-                    <p>Chart visualization requires additional setup</p>
-                    <p className="text-sm mt-2">Revenue data available for export</p>
-                  </div>
+                <div className="h-72 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={chartData}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                      <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} dy={10} />
+                      <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} tickFormatter={(value) => `${value/1000}k`} />
+                      <Tooltip
+                        cursor={{stroke: '#0f766e', strokeWidth: 2}}
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        formatter={(value: number) => [`TZS ${value.toLocaleString()}`, 'Revenue']}
+                      />
+                      <Line type="monotone" dataKey="sales" stroke="#0f766e" strokeWidth={3} dot={{fill: '#0f766e', strokeWidth: 2, r: 4}} activeDot={{r: 6}} />
+                    </LineChart>
+                  </ResponsiveContainer>
                 </div>
               </div>
 
               {/* Category Performance */}
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 break-inside-avoid">
                 <h4 className="font-bold text-slate-800 mb-6">Sales by Category</h4>
-                <div className="h-72 bg-slate-50 rounded-lg flex items-center justify-center">
-                  <div className="text-center text-slate-500">
-                    <BarChart3 size={48} className="mx-auto mb-4 opacity-50" />
-                    <p>Chart visualization requires additional setup</p>
-                    <p className="text-sm mt-2">Category data available for export</p>
+                <div className="h-72 w-full relative">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={categorySales}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={60}
+                        outerRadius={80}
+                        paddingAngle={5}
+                        dataKey="value"
+                      >
+                        {categorySales.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip formatter={(value: number) => `TZS ${value.toLocaleString()}`} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className="text-center">
+                      <span className="text-2xl font-bold text-teal-800">{categorySales.length}</span>
+                      <p className="text-xs text-slate-500 uppercase">Categories</p>
+                    </div>
                   </div>
                 </div>
+                <div className="mt-6 space-y-3">
+                  {categorySales.slice(0, 5).map((category, index) => (
+                    <div key={category.name} className="flex items-center justify-between text-sm">
+                      <div className="flex items-center">
+                        <div className="w-3 h-3 rounded-full mr-2" style={{ backgroundColor: COLORS[index % COLORS.length] }}></div>
+                        <span className="text-slate-600">{category.name}</span>
+                      </div>
+                      <span className="font-medium text-slate-900">{(category.value / 1000000).toFixed(1)}M TZS</span>
+                    </div>
+                  ))}
+                </div>
               </div>
+            </div>
+
+            {/* Invoice List with Print Button */}
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mt-8">
+              <h4 className="font-bold text-slate-800 mb-4">Invoices</h4>
+              {filteredSales.length === 0 ? (
+                <div className="text-center py-8 text-slate-500">
+                  <FileText size={48} className="mx-auto mb-4 opacity-30" />
+                  <p>No invoices available</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        <th className="px-4 py-3 font-semibold text-slate-600">Invoice #</th>
+                        <th className="px-4 py-3 font-semibold text-slate-600">Date</th>
+                        <th className="px-4 py-3 font-semibold text-slate-600">Customer</th>
+                        <th className="px-4 py-3 font-semibold text-slate-600">Total</th>
+                        <th className="px-4 py-3 font-semibold text-slate-600">Discount</th>
+                        <th className="px-4 py-3 font-semibold text-slate-600">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {filteredInvoices.map((inv: Invoice) => {
+                        const totalDiscount = (inv.payments || []).reduce((sum: number, p: any) => sum + (p.discount || 0), 0);
+                        return (
+                          <tr key={inv.id} className="hover:bg-slate-50">
+                            <td className="px-4 py-3 font-medium text-slate-800">{inv.id}</td>
+                            <td className="px-4 py-3 text-slate-600">{new Date(inv.dateIssued).toLocaleDateString()}</td>
+                            <td className="px-4 py-3 text-slate-600">{inv.customerName}</td>
+                            <td className="px-4 py-3 text-slate-700 font-bold">{inv.totalAmount.toLocaleString()} TZS</td>
+                            <td className="px-4 py-3 text-slate-700 font-bold">{totalDiscount.toLocaleString()} TZS</td>
+                            <td className="px-4 py-3">
+                              <button
+                                className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-xs font-bold"
+                                onClick={() => handlePrintInvoice(inv)}
+                              >
+                                Print
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -616,7 +975,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
                 <p className="text-sm font-medium text-slate-500 mb-1">Total Stock Value</p>
-                <h3 className="text-3xl font-bold text-slate-800">
+                <h3 className="text-2xl md:text-3xl font-bold text-slate-800 truncate">
                   {(inventoryAnalytics.totalValuation / 1000000).toFixed(1)}M
                   <span className="text-sm text-slate-400 font-normal"> TZS</span>
                 </h3>
@@ -925,6 +1284,132 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
           </div>
         )}
 
+        {/* SALES TAB */}
+        {activeTab === 'sales' && (
+          <div className="space-y-6">
+            {/* Sales Report Header */}
+            <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
+              <h3 className="text-lg font-bold text-slate-800">Sales Report</h3>
+              <div className="flex flex-col sm:flex-row gap-3">
+                {/* Date Filters */}
+                <div className="flex gap-2">
+                  <input
+                    type="date"
+                    value={salesStartDate}
+                    onChange={(e) => setSalesStartDate(e.target.value)}
+                    className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                    placeholder="Start Date"
+                  />
+                  <input
+                    type="date"
+                    value={salesEndDate}
+                    onChange={(e) => setSalesEndDate(e.target.value)}
+                    className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                    placeholder="End Date"
+                  />
+                </div>
+
+                {/* Sort Options */}
+                <select
+                  value={salesSortBy}
+                  onChange={(e) => setSalesSortBy(e.target.value as any)}
+                  className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                  aria-label="Sort sales by"
+                >
+                  <option value="date">Sort by Date</option>
+                  <option value="name">Sort by Name</option>
+                  <option value="time">Sort by Time</option>
+                </select>
+
+                <select
+                  value={salesSortOrder}
+                  onChange={(e) => setSalesSortOrder(e.target.value as any)}
+                  className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                  aria-label="Sort order"
+                >
+                  <option value="desc">Descending</option>
+                  <option value="asc">Ascending</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Sales Summary */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <p className="text-sm font-medium text-slate-500 mb-1">Total Sales</p>
+                <h3 className="text-2xl font-bold text-slate-800">{reportSales.length}</h3>
+              </div>
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <p className="text-sm font-medium text-slate-500 mb-1">Total Revenue</p>
+                <h3 className="text-2xl font-bold text-slate-800">{reportSales.reduce((sum, s) => sum + s.totalAmount, 0).toLocaleString()} TZS</h3>
+              </div>
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <p className="text-sm font-medium text-slate-500 mb-1">Total Profit</p>
+                <h3 className="text-2xl font-bold text-slate-800">{reportSales.reduce((sum, s) => sum + s.profit, 0).toLocaleString()} TZS</h3>
+              </div>
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <p className="text-sm font-medium text-slate-500 mb-1">Avg Sale</p>
+                <h3 className="text-2xl font-bold text-slate-800">{reportSales.length > 0 ? (reportSales.reduce((sum, s) => sum + s.totalAmount, 0) / reportSales.length).toFixed(0) : 0} TZS</h3>
+              </div>
+            </div>
+
+            {/* Sales Table */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left min-w-[800px]">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Sale ID</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Date</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Time</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Customer</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Amount</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Profit</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Payment</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {reportSales.map((sale) => (
+                      <tr key={sale.id} className="hover:bg-slate-50">
+                        <td className="px-6 py-4 font-mono text-sm text-slate-600">{sale.id}</td>
+                        <td className="px-6 py-4 text-slate-600">{new Date(sale.date).toLocaleDateString()}</td>
+                        <td className="px-6 py-4 text-slate-600">{new Date(sale.date).toLocaleTimeString()}</td>
+                        <td className="px-6 py-4 text-slate-800 font-medium">{sale.customerName || 'Walk-in'}</td>
+                        <td className="px-6 py-4 font-bold text-slate-800">{sale.totalAmount.toLocaleString()} TZS</td>
+                        <td className="px-6 py-4 text-emerald-600 font-medium">{sale.profit.toLocaleString()} TZS</td>
+                        <td className="px-6 py-4">
+                          <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs font-medium">
+                            {sale.paymentMethod}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <button
+                            onClick={() => {
+                              setSelectedSale(sale);
+                              setShowSalesPreview(true);
+                            }}
+                            className="text-teal-600 hover:text-teal-800 p-1.5 hover:bg-teal-50 rounded"
+                            title="Preview Sale"
+                          >
+                            <Eye size={16} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {reportSales.length === 0 && (
+                <div className="p-8 text-center text-slate-500">
+                  <FileText size={48} className="mx-auto mb-4 opacity-30" />
+                  <p>No sales found for the selected criteria.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* AUDIT TAB */}
         {activeTab === 'audit' && (
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
@@ -1003,6 +1488,69 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory, sales, ex
           </div>
         )}
       </div>
+
+      {/* Sales Preview Modal */}
+      {showSalesPreview && selectedSale && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 no-print">
+          <div className="bg-white rounded-lg w-full max-w-full sm:max-w-md md:max-w-2xl lg:max-w-2xl max-h-[90vh] overflow-y-auto m-2 md:m-4">
+            <div className="p-6 border-b border-slate-100">
+              <div className="flex justify-between items-center">
+                <h3 className="text-xl font-bold text-slate-900">Sale Details - {selectedSale.id}</h3>
+                <button
+                  onClick={() => setShowSalesPreview(false)}
+                  className="text-slate-400 hover:text-slate-600"
+                  title="Close"
+                  aria-label="Close preview"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Date</label>
+                  <p className="text-slate-900">{new Date(selectedSale.date).toLocaleDateString()}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Time</label>
+                  <p className="text-slate-900">{new Date(selectedSale.date).toLocaleTimeString()}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Customer</label>
+                  <p className="text-slate-900">{selectedSale.customerName || 'Walk-in'}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Payment Method</label>
+                  <p className="text-slate-900">{selectedSale.paymentMethod}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Total Amount</label>
+                  <p className="text-slate-900 font-bold">{selectedSale.totalAmount.toLocaleString()} TZS</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Profit</label>
+                  <p className="text-emerald-600 font-bold">{selectedSale.profit.toLocaleString()} TZS</p>
+                </div>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-500">Items</label>
+                <div className="mt-2 space-y-2">
+                  {selectedSale.items.map((item, index) => (
+                    <div key={index} className="flex justify-between items-center p-3 bg-slate-50 rounded-lg">
+                      <div>
+                        <p className="font-medium text-slate-900">{item.name}</p>
+                        <p className="text-sm text-slate-500">Qty: {item.quantity}</p>
+                      </div>
+                      <p className="font-bold text-slate-900">{(item.price * item.quantity).toLocaleString()} TZS</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

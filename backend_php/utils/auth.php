@@ -18,7 +18,7 @@ function generateToken($user) {
         'role' => $user['role'],
         'branch_id' => $user['branch_id'],
         'iat' => time(),
-        'exp' => time() + (12 * 60 * 60) // 12 hours
+        'exp' => time() + (8 * 60 * 60) // 8 hours
     ];
     return JWT::encode($payload);
 }
@@ -36,23 +36,37 @@ function authenticateToken() {
     }
 
     if (!$authHeader || !preg_match('/Bearer\s+(.*)$/i', $authHeader, $matches)) {
+        error_log('Authentication failed: No Authorization header or invalid format');
         http_response_code(401);
         echo json_encode(['error' => 'Access token required']);
         exit;
     }
 
     $token = $matches[1];
+    error_log('Attempting to decode token: ' . substr($token, 0, 20) . '...');
+    
     try {
         $payload = JWT::decode($token);
     } catch (Exception $e) {
+        error_log('JWT decode exception: ' . $e->getMessage());
         http_response_code(403);
         echo json_encode(['error' => 'Invalid token']);
         exit;
     }
 
-    if (!$payload || isset($payload['exp']) && $payload['exp'] < time()) {
+    // JWT::decode() returns false if signature doesn't match or token is invalid
+    if ($payload === false || $payload === null) {
+        error_log('JWT decode returned false/null - invalid signature or malformed token');
         http_response_code(403);
-        echo json_encode(['error' => 'Invalid or expired token']);
+        echo json_encode(['error' => 'Invalid token']);
+        exit;
+    }
+
+    // Check if token is expired
+    if (isset($payload['exp']) && $payload['exp'] < time()) {
+        error_log('Token expired. Expiry time: ' . $payload['exp'] . ', Current time: ' . time());
+        http_response_code(403);
+        echo json_encode(['error' => 'Token expired']);
         exit;
     }
 
@@ -60,10 +74,13 @@ function authenticateToken() {
 }
 
 function authorizeRoles($allowedRoles) {
-    $user = authenticateToken();
+    // Allow unauthenticated GET requests (read operations)
+    if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+        return null;
+    }
 
-    // Allow all roles for GET requests (read operations)
-    if ($_SERVER['REQUEST_METHOD'] === 'GET' || in_array($user['role'], $allowedRoles)) {
+    $user = authenticateToken();
+    if (in_array($user['role'], $allowedRoles)) {
         return $user;
     }
 

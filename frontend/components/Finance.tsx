@@ -1,19 +1,23 @@
 
 import React, { useState, useMemo } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell
 } from 'recharts';
 import {
   DollarSign, TrendingUp, TrendingDown, Receipt,
-  FileText, Plus, X, Printer, Store, Wallet, Building, CheckCircle, FilePlus, User, Eye, Archive, XCircle, Download
+  FileText, Plus, X, Printer, Store, Wallet, Building, CheckCircle, FilePlus, User, Eye, Archive, XCircle, Download, FileBarChart, Truck
 } from 'lucide-react';
 import { Invoice, PaymentMethod, Expense, Sale, Branch, Staff, UserRole, SystemSetting } from '../types';
 import { api } from '../services/api';
+import { printService } from '../services/printService';
+import { openCustomPrint } from '../services/printUtils';
 import InvoiceModal from './InvoiceModal';
 import ExpenseModal from './ExpenseModal';
 import InvoicePreviewModal from './InvoicePreviewModal';
 import PaymentModal from './PaymentModal.tsx';
+import ReportPrintTemplate from './ReportPrintTemplate';
 
 const PAYMENT_METHODS_DATA = [
   { name: 'Cash', value: 4500000 },
@@ -39,7 +43,7 @@ interface FinanceProps {
 }
 
 const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoices = [], expenses: propExpenses = [], sales: propSales = [], onProcessPayment, onCreateExpense, onActionExpense, onArchiveItem, branches = [], currentUser, settings = [] }) => {
-   const [activeTab, setActiveTab] = useState<'overview' | 'invoices' | 'expenses' | 'tax'>('overview');
+    const [activeTab, setActiveTab] = useState<'overview' | 'invoices' | 'expenses' | 'sales'>('overview');
 
    // Modal State
    const [showInvoiceModal, setShowInvoiceModal] = useState(false);
@@ -54,24 +58,35 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
    const [invoiceStatusFilter, setInvoiceStatusFilter] = useState<'all' | 'PAID' | 'PARTIAL' | 'UNPAID'>('all');
    const [expenseStatusFilter, setExpenseStatusFilter] = useState<'all' | 'Pending' | 'Approved' | 'Rejected'>('all');
 
+   // Sales Report State
+   const [salesStartDate, setSalesStartDate] = useState('');
+   const [salesEndDate, setSalesEndDate] = useState('');
+   const [salesCustomerSearch, setSalesCustomerSearch] = useState('');
+   const [salesSortBy, setSalesSortBy] = useState<'date' | 'name' | 'time'>('date');
+   const [salesSortOrder, setSalesSortOrder] = useState<'asc' | 'desc'>('desc');
+   const [showSalesPreview, setShowSalesPreview] = useState(false);
+   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
+
    // Data State - loaded from API
    const [invoices, setInvoices] = useState<Invoice[]>(propInvoices);
    const [expenses, setExpenses] = useState<Expense[]>(propExpenses);
    const [sales, setSales] = useState<Sale[]>(propSales);
    const [isLoading, setIsLoading] = useState(true);
 
+  const currentBranch = branches.find(b => b.id === currentBranchId);
+  const isHeadOffice = currentBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';
+  const branchName = currentBranch?.name || 'All Branches';
+
   // Form States
-  const [newInvoice, setNewInvoice] = useState({ customer: '', amount: '', description: '', due: '', includeVAT: true });
-  const [newPayment, setNewPayment] = useState({ amount: '', receipt: '', method: PaymentMethod.CASH });
+  const [newInvoice, setNewInvoice] = useState({ customer: '', phone: '', amount: '', description: '', due: '' });
+  const [newPayment, setNewPayment] = useState({ amount: '', discount: '', receipt: '', method: PaymentMethod.CASH });
   const [newExpense, setNewExpense] = useState({
     description: '',
     category: 'Utilities',
     amount: '',
-    date: new Date().toISOString().split('T')[0]
+    date: new Date().toISOString().split('T')[0],
+    branchId: isHeadOffice ? (branches.find(b => !b.isHeadOffice)?.id || '') : currentBranchId
   });
-
-  const currentBranch = branches.find(b => b.id === currentBranchId);
-  const isHeadOffice = currentBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';
 
   // Helper functions to get company info from settings
   const getCompanyInfo = () => {
@@ -86,33 +101,40 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
     return { companyName, tinNumber, vrnNumber, address, phone, email, logo };
   };
 
-  // Load data from API on mount
-  React.useEffect(() => {
-    const loadFinanceData = async () => {
-      setIsLoading(true);
-      try {
-        const [invoicesData, expensesData, salesData] = await Promise.all([
-          api.getInvoices(),
-          api.getExpenses(),
-          api.getSales()
-        ]);
+  // Load data from API on mount and poll for updates
+   React.useEffect(() => {
+     const loadFinanceData = async (isInitialLoad = false) => {
+       if (isInitialLoad) setIsLoading(true);
+       try {
+         const [invoicesData, expensesData, salesData] = await Promise.all([
+           api.getInvoices(),
+           api.getExpenses(),
+           api.getSales()
+         ]);
 
-        setInvoices(invoicesData || []);
-        setExpenses(expensesData || []);
-        setSales(salesData || []);
-      } catch (error) {
-        console.error('Failed to load finance data:', error);
-        // Keep prop data as fallback
-        setInvoices(propInvoices);
-        setExpenses(propExpenses);
-        setSales(propSales);
-      } finally {
-        setIsLoading(false);
-      }
-    };
+         setInvoices(invoicesData || []);
+         setExpenses(expensesData || []);
+         setSales(salesData || []);
+       } catch (error) {
+         console.error('Failed to load finance data:', error);
+         // Keep prop data as fallback
+         setInvoices(propInvoices);
+         setExpenses(propExpenses);
+         setSales(propSales);
+       } finally {
+         if (isInitialLoad) setIsLoading(false);
+       }
+     };
 
-    loadFinanceData();
-  }, [currentBranchId]); // Reload when branch changes
+     // Initial load
+     loadFinanceData(true);
+
+     // Set up polling every 30 seconds
+     const intervalId = setInterval(() => loadFinanceData(false), 30000);
+
+     // Cleanup interval on unmount or branch change
+     return () => clearInterval(intervalId);
+   }, [currentBranchId]); // Reload when branch changes
 
   // Filter Data Logic
   const filteredInvoices = isHeadOffice ? invoices : invoices.filter(i => i.branchId === currentBranchId);
@@ -130,6 +152,54 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
     exp.description.toLowerCase().includes(expenseSearch.toLowerCase()) ||
     exp.category.toLowerCase().includes(expenseSearch.toLowerCase())
   ).filter(exp => expenseStatusFilter === 'all' || exp.status === expenseStatusFilter);
+
+  // Filtered and sorted sales for report
+  const reportSales = useMemo(() => {
+    let filtered = filteredSales;
+
+    // Customer name filtering
+    if (salesCustomerSearch) {
+      filtered = filtered.filter(s =>
+        s.customerName?.toLowerCase().includes(salesCustomerSearch.toLowerCase())
+      );
+    }
+
+    // Date filtering
+    if (salesStartDate) {
+      filtered = filtered.filter(s => new Date(s.date) >= new Date(salesStartDate));
+    }
+    if (salesEndDate) {
+      filtered = filtered.filter(s => new Date(s.date) <= new Date(salesEndDate + 'T23:59:59'));
+    }
+
+    // Sorting
+    filtered.sort((a, b) => {
+      let aVal: any, bVal: any;
+      switch (salesSortBy) {
+        case 'date':
+          aVal = new Date(a.date);
+          bVal = new Date(b.date);
+          break;
+        case 'name':
+          aVal = a.customerName || '';
+          bVal = b.customerName || '';
+          break;
+        case 'time':
+          aVal = new Date(a.date).getTime();
+          bVal = new Date(b.date).getTime();
+          break;
+        default:
+          aVal = a.date;
+          bVal = b.date;
+      }
+
+      if (aVal < bVal) return salesSortOrder === 'asc' ? -1 : 1;
+      if (aVal > bVal) return salesSortOrder === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    return filtered;
+  }, [filteredSales, salesCustomerSearch, salesStartDate, salesEndDate, salesSortBy, salesSortOrder]);
 
   // Permission Logic for Expense Approval
   const canApproveExpenses = (expense: Expense) => {
@@ -158,7 +228,10 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
     const profit = filteredSales.reduce((acc, curr) => acc + curr.profit, 0);
     const totalExpenses = filteredExpenses.reduce((acc, curr) => acc + curr.amount, 0);
     const netProfit = profit - totalExpenses;
-    const receivables = filteredInvoices.reduce((acc, i) => acc + (i.totalAmount - i.paidAmount), 0);
+    const receivables = filteredInvoices.reduce((acc, i) => {
+      const totalDiscount = i.payments.reduce((sum, p) => sum + (p.discount || 0), 0);
+      return acc + (i.totalAmount - i.paidAmount - totalDiscount);
+    }, 0);
 
     return { revenue, netProfit, totalExpenses, receivables };
   }, [filteredSales, filteredExpenses, filteredInvoices]);
@@ -189,7 +262,10 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
       'Customer': inv.customerName,
       'Total Amount': inv.totalAmount,
       'Paid Amount': inv.paidAmount,
-      'Balance': inv.totalAmount - inv.paidAmount,
+      'Balance': (() => {
+        const totalDiscount = inv.payments.reduce((sum, p) => sum + (p.discount || 0), 0);
+        return inv.status === 'PAID' ? 0 : inv.totalAmount - inv.paidAmount - totalDiscount;
+      })(),
       'Status': inv.status,
       'Date Issued': inv.dateIssued,
       'Due Date': inv.dueDate,
@@ -210,6 +286,68 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
     exportToCSV(exportData, `expenses_${new Date().toISOString().split('T')[0]}.csv`);
   };
 
+  const handleExportSales = () => {
+    const exportData = reportSales.map((s: Sale) => ({
+      ID: s.id,
+      Date: s.date,
+      Time: new Date(s.date).toLocaleTimeString(),
+      Customer_Name: s.customerName,
+      Total_Amount: s.totalAmount,
+      Profit: s.profit,
+      Payment_Method: s.paymentMethod,
+      Branch: branches.find(b => b.id === s.branchId)?.name || s.branchId
+    }));
+
+    // Append summary row
+    if (exportData.length > 0) {
+      exportData.push({});
+      const totalAmount = reportSales.reduce((sum, s) => sum + s.totalAmount, 0);
+      const totalProfit = reportSales.reduce((sum, s) => sum + s.profit, 0);
+      exportData.push({
+        ID: 'TOTAL_SUMMARY',
+        Total_Amount: totalAmount,
+        Profit: totalProfit,
+        Branch: isHeadOffice ? 'All Branches' : branches.find(b => b.id === currentBranchId)?.name || 'Current Branch'
+      });
+    }
+    exportToCSV(exportData, `sales_report_${new Date().toISOString().split('T')[0]}.csv`);
+  };
+
+  // Print sales report
+  const handlePrintSalesReport = () => {
+    const reportData = {
+      title: 'Sales Report',
+      branchName,
+      dateRange: salesStartDate && salesEndDate ? `${salesStartDate} to ${salesEndDate}` : 'All Time',
+      data: reportSales.map(s => ({
+        'Sale ID': s.id,
+        'Date': new Date(s.date).toLocaleDateString(),
+        'Time': new Date(s.date).toLocaleTimeString(),
+        'Customer': s.customerName || 'Walk-in',
+        'Amount': s.totalAmount.toLocaleString() + ' TZS',
+        'Profit': s.profit.toLocaleString() + ' TZS',
+        'Payment Method': s.paymentMethod
+      })),
+      summary: {
+        'Total Sales': reportSales.length.toString(),
+        'Total Revenue': reportSales.reduce((sum, s) => sum + s.totalAmount, 0).toLocaleString() + ' TZS',
+        'Total Profit': reportSales.reduce((sum, s) => sum + s.profit, 0).toLocaleString() + ' TZS'
+      }
+    };
+    const companySettings = {
+      companyName: 'PMS Pharmacy',
+      tinNumber: '123-456-789',
+      address: 'Bagamoyo Road, Dar es Salaam, Tanzania',
+      phone: '+255 700 123 456',
+      email: 'info@pms-pharmacy.tz',
+      logo: '/backend_php/uploads/logos/logo.png'
+    };
+    const html = renderToStaticMarkup(
+      <ReportPrintTemplate report={reportData} companySettings={companySettings} />
+    );
+    openCustomPrint(html, 'Sales Report Print');
+  };
+
   // Income Vs Expense Chart Data
   const incomeVsExpenseData = useMemo(() => {
       const last7Days = Array.from({length: 7}, (_, i) => {
@@ -219,16 +357,19 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
       });
 
       return last7Days.map(dateStr => {
-          const daySales = filteredSales.filter(s => s.date.startsWith(dateStr));
-          const dayExpenses = filteredExpenses.filter(e => e.date === dateStr);
+          // Use paid invoice amounts as income
+          const dayIncome = filteredInvoices
+              .filter(inv => inv.status === 'PAID' && inv.dateIssued.startsWith(dateStr))
+              .reduce((sum, inv) => sum + inv.paidAmount, 0);
+          const dayExpenses = filteredExpenses.filter(e => e.date.startsWith(dateStr));
           
           return {
-              name: new Date(dateStr).toLocaleDateString('en-US', { weekday: 'short' }),
-              sales: daySales.reduce((sum, s) => sum + s.totalAmount, 0),
+              name: new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+              sales: dayIncome,
               expense: dayExpenses.reduce((sum, e) => sum + e.amount, 0)
           };
       });
-  }, [filteredSales, filteredExpenses]);
+  }, [filteredInvoices, filteredExpenses]);
 
   const handleCreateInvoice = async () => {
     if(!newInvoice.customer || !newInvoice.amount) return;
@@ -237,6 +378,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
       const invoiceData: Partial<Invoice> = {
         branchId: isHeadOffice ? 'BR001' : currentBranchId, // Default to BR001 if HO creates
         customerName: newInvoice.customer,
+        customerPhone: newInvoice.phone,
         dateIssued: new Date().toISOString().split('T')[0],
         dueDate: newInvoice.due || new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0],
         totalAmount: parseFloat(newInvoice.amount),
@@ -245,8 +387,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
         description: newInvoice.description || 'General Supplies',
         source: 'MANUAL',
         items: [],
-        payments: [],
-        includeVAT: newInvoice.includeVAT
+        payments: []
       };
 
       const createdInvoice = await api.createInvoice(invoiceData);
@@ -257,45 +398,23 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
       }
 
       setShowInvoiceModal(false);
-      setNewInvoice({ customer: '', amount: '', description: '', due: '', includeVAT: true });
+      setNewInvoice({ customer: '', phone: '', amount: '', description: '', due: '' });
     } catch (error) {
       console.error('Failed to create invoice:', error);
-      // Fallback to local creation if API fails
-      const invoice: Invoice = {
-        id: `INV-2023-${Math.floor(Math.random() * 1000)}`,
-        branchId: isHeadOffice ? 'BR001' : currentBranchId,
-        customerName: newInvoice.customer,
-        dateIssued: new Date().toISOString().split('T')[0],
-        dueDate: newInvoice.due || new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0],
-        totalAmount: parseFloat(newInvoice.amount),
-        paidAmount: 0,
-        status: 'UNPAID',
-        description: newInvoice.description || 'General Supplies',
-        source: 'MANUAL',
-        items: [],
-        payments: [],
-        includeVAT: newInvoice.includeVAT,
-        archived: false
-      };
-
-      setInvoices(prev => [invoice, ...prev]);
-      if (onProcessPayment) {
-        onProcessPayment(invoice);
-      }
-
-      setShowInvoiceModal(false);
-      setNewInvoice({ customer: '', amount: '', description: '', due: '', includeVAT: true });
+      throw new Error('Failed to create invoice. Please check your connection and try again.');
     }
   };
 
   const openPaymentModal = (invoice: Invoice) => {
     setSelectedInvoice(invoice);
-    const remaining = invoice.totalAmount - invoice.paidAmount;
+    const totalDiscount = invoice.payments.reduce((sum, p) => sum + (p.discount || 0), 0);
+    const remaining = invoice.totalAmount - invoice.paidAmount - totalDiscount;
     // Generate a unique receipt number automatically
     const generatedReceipt = `TRA-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
     
     setNewPayment({
         amount: remaining.toString(), // Auto-fill remaining balance
+        discount: '0',
         receipt: generatedReceipt,
         method: PaymentMethod.CASH
     });
@@ -307,11 +426,16 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
 
     try {
       const amount = parseFloat(newPayment.amount);
+      const discountPercent = parseFloat(newPayment.discount) || 0;
+      const discountAmount = (amount * discountPercent) / 100;
+      const effectiveAmount = amount - discountAmount;
 
       // Call backend API to record payment
       const paymentData = {
         invoiceId: selectedInvoice.id,
         amount: amount,
+        discount: discountAmount,
+        discountPercent: discountPercent,
         method: newPayment.method,
         receiptNumber: newPayment.receipt
       };
@@ -321,69 +445,22 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
         body: JSON.stringify(paymentData)
       });
 
-      // Update local state
-      const newPaidAmount = selectedInvoice.paidAmount + amount;
+      // Refresh invoices from backend to get updated data
+      const updatedInvoices = await api.getInvoices();
+      setInvoices(updatedInvoices);
 
-      let newStatus: Invoice['status'] = 'PARTIAL';
-      if(newPaidAmount >= selectedInvoice.totalAmount) newStatus = 'PAID';
-      if(newPaidAmount === 0) newStatus = 'UNPAID';
+      // Find the updated invoice
+      const updatedInvoice = updatedInvoices.find(inv => inv.id === selectedInvoice.id);
+      if (updatedInvoice) {
+        onProcessPayment(updatedInvoice); // This triggers inventory deduction in App.tsx if fully paid
+      }
 
-      const updatedInvoice: Invoice = {
-          ...selectedInvoice,
-          paidAmount: newPaidAmount,
-          status: newStatus,
-          payments: [
-              ...selectedInvoice.payments,
-              {
-                  id: `PAY-${Date.now()}`,
-                  amount: amount,
-                  date: new Date().toISOString().split('T')[0],
-                  receiptNumber: newPayment.receipt,
-                  method: newPayment.method,
-                  recordedBy: currentUser?.name || 'Current User'
-              }
-          ]
-      };
-
-      // Update local invoices state
-      setInvoices(prev => prev.map(inv => inv.id === selectedInvoice.id ? updatedInvoice : inv));
-
-      onProcessPayment(updatedInvoice); // This triggers inventory deduction in App.tsx if fully paid
       setShowPaymentModal(false);
       setSelectedInvoice(null);
-      setNewPayment({ amount: '', receipt: '', method: PaymentMethod.CASH });
+      setNewPayment({ amount: '', discount: '', receipt: '', method: PaymentMethod.CASH });
     } catch (error) {
       console.error('Failed to record payment:', error);
-      // Fallback to local update if API fails
-      const amount = parseFloat(newPayment.amount);
-      const newPaidAmount = selectedInvoice.paidAmount + amount;
-
-      let newStatus: Invoice['status'] = 'PARTIAL';
-      if(newPaidAmount >= selectedInvoice.totalAmount) newStatus = 'PAID';
-      if(newPaidAmount === 0) newStatus = 'UNPAID';
-
-      const updatedInvoice: Invoice = {
-          ...selectedInvoice,
-          paidAmount: newPaidAmount,
-          status: newStatus,
-          payments: [
-              ...selectedInvoice.payments,
-              {
-                  id: `PAY-${Date.now()}`,
-                  amount: amount,
-                  date: new Date().toISOString().split('T')[0],
-                  receiptNumber: newPayment.receipt,
-                  method: newPayment.method,
-                  recordedBy: currentUser?.name || 'Current User'
-              }
-          ]
-      };
-
-      setInvoices(prev => prev.map(inv => inv.id === selectedInvoice.id ? updatedInvoice : inv));
-      onProcessPayment(updatedInvoice);
-      setShowPaymentModal(false);
-      setSelectedInvoice(null);
-      setNewPayment({ amount: '', receipt: '', method: PaymentMethod.CASH });
+      throw new Error('Failed to record payment. Please check your connection and try again.');
     }
   };
 
@@ -397,7 +474,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
         amount: parseFloat(newExpense.amount),
         date: newExpense.date,
         status: 'Pending',
-        branchId: currentBranchId
+        branchId: newExpense.branchId
       };
 
       const createdExpense = await api.createExpense(expenseData);
@@ -412,34 +489,12 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
         description: '',
         category: 'Utilities',
         amount: '',
-        date: new Date().toISOString().split('T')[0]
+        date: new Date().toISOString().split('T')[0],
+        branchId: isHeadOffice ? (branches.find(b => !b.isHeadOffice)?.id || '') : currentBranchId
       });
     } catch (error) {
       console.error('Failed to create expense:', error);
-      // Fallback to local creation if API fails
-      const expense: Expense = {
-        id: Date.now(),
-        category: newExpense.category,
-        description: newExpense.description,
-        amount: parseFloat(newExpense.amount),
-        date: newExpense.date,
-        status: 'Pending',
-        branchId: currentBranchId,
-        archived: false
-      };
-
-      setExpenses(prev => [expense, ...prev]);
-      if (onCreateExpense) {
-        onCreateExpense(expense);
-      }
-
-      setShowExpenseModal(false);
-      setNewExpense({
-        description: '',
-        category: 'Utilities',
-        amount: '',
-        date: new Date().toISOString().split('T')[0]
-      });
+      throw new Error('Failed to create expense. Please check your connection and try again.');
     }
   };
 
@@ -448,9 +503,6 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
     setShowPreviewModal(true);
   };
 
-  const handlePrintInvoice = () => {
-      window.print();
-  };
 
   const handleExpenseAction = (id: number, action: 'Approved' | 'Rejected') => {
       // This will be passed as onActionExpense prop from App.tsx
@@ -489,11 +541,11 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
             >
               Expenses
             </button>
-            <button 
-              onClick={() => setActiveTab('tax')}
-              className={`px-4 py-2 rounded-lg font-medium text-sm transition-all ${activeTab === 'tax' ? 'bg-teal-600 text-white shadow-md' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+            <button
+              onClick={() => setActiveTab('sales')}
+              className={`px-4 py-2 rounded-lg font-medium text-sm transition-all ${activeTab === 'sales' ? 'bg-teal-600 text-white shadow-md' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}
             >
-              Tax & TRA
+              Sales Report
             </button>
           </div>
         </div>
@@ -590,6 +642,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                    value={invoiceStatusFilter}
                    onChange={(e) => setInvoiceStatusFilter(e.target.value as any)}
                    className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                   aria-label="Filter invoices by status"
                  >
                    <option value="all">All Status</option>
                    <option value="PAID">Paid</option>
@@ -607,21 +660,24 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
              </div>
             
             <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-                <table className="w-full text-left">
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left">
                     <thead className="bg-slate-50 border-b border-slate-200">
                         <tr>
                             <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Invoice ID</th>
                             <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Origin</th>
+                            <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Branch</th>
                             <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Customer</th>
                             <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Total Amount</th>
                             <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Paid / Balance</th>
                             <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Status</th>
-                            <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Actions</th>
+                            <th className="px-2 py-4 text-xs font-semibold text-slate-500 uppercase">Actions</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                         {searchedInvoices.map((inv) => {
-                          const balance = inv.totalAmount - inv.paidAmount;
+                          const totalDiscount = inv.payments.reduce((sum, p) => sum + (p.discount || 0), 0);
+                          const balance = inv.status === 'PAID' ? 0 : inv.totalAmount - inv.paidAmount - totalDiscount;
                           return (
                             <tr key={inv.id} className="hover:bg-slate-50">
                                 <td className="px-6 py-4 font-mono text-sm text-slate-600">{inv.id}</td>
@@ -630,12 +686,17 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                                         <span className="flex items-center gap-1 text-xs font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded w-fit">
                                             <Store size={10} /> POS
                                         </span>
+                                    ) : inv.source === 'SHIPMENT' ? (
+                                        <span className="flex items-center gap-1 text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded w-fit">
+                                            <Truck size={10} /> Shipment
+                                        </span>
                                     ) : (
                                         <span className="flex items-center gap-1 text-xs font-bold text-slate-500 bg-slate-100 px-2 py-1 rounded w-fit">
                                             <FileText size={10} /> Manual
                                         </span>
                                     )}
                                 </td>
+                                <td className="px-6 py-4 text-xs text-slate-500">{branches.find(b => b.id === inv.branchId)?.name || 'Unknown'}</td>
                                 <td className="px-6 py-4">
                                     <div className="font-bold text-slate-800 text-sm">{inv.customerName}</div>
                                     <div className="text-xs text-slate-500">{inv.description}</div>
@@ -648,37 +709,43 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                                     </div>
                                 </td>
                                 <td className="px-6 py-4">
-                                    <span className={`px-2 py-1 rounded text-xs font-bold ${
+                                    <div className={`px-2 py-1 rounded text-xs font-bold whitespace-pre-line ${
                                         inv.status === 'PAID' ? 'bg-emerald-100 text-emerald-700' :
                                         inv.status === 'PARTIAL' ? 'bg-amber-100 text-amber-700' :
                                         'bg-rose-100 text-rose-700'
                                     }`}>
-                                        {inv.status}
-                                    </span>
+                                        {(() => {
+                                            if (inv.status === 'PAID' && inv.paidAmount < inv.totalAmount) {
+                                                const percent = ((inv.totalAmount - inv.paidAmount) / inv.totalAmount) * 100;
+                                                return `PAID\nDISCOUNT ${percent.toFixed(0)}%`;
+                                            }
+                                            return inv.status;
+                                        })()}
+                                    </div>
                                 </td>
-                                <td className="px-6 py-4">
-                                    <div className="flex items-center gap-2">
-                                          <button 
+                                <td className="px-2 py-4">
+                                    <div className="flex flex-col sm:flex-row items-start sm:items-center gap-1 sm:gap-2">
+                                          <button
                                               onClick={() => handleViewInvoice(inv)}
-                                              className="text-slate-500 hover:text-blue-600 p-1.5 hover:bg-blue-50 rounded" 
+                                              className="text-slate-500 hover:text-blue-600 p-1.5 hover:bg-blue-50 rounded"
                                               title="View Invoice"
                                           >
                                               <Eye size={16} />
                                           </button>
                                         {inv.status !== 'PAID' ? (
-                                          <button 
+                                          <button
                                             onClick={() => openPaymentModal(inv)}
-                                            className="text-teal-600 hover:text-teal-800 font-bold text-xs bg-teal-50 px-2 py-1 rounded hover:bg-teal-100 flex items-center gap-1 transition-colors"
+                                            className="text-teal-600 hover:text-teal-800 font-bold text-xs bg-teal-50 px-2 py-1 rounded hover:bg-teal-100 flex items-center gap-1 transition-colors whitespace-nowrap"
                                           >
                                               <Wallet size={12} /> Pay Now
                                           </button>
                                         ) : (
-                                            <div className="flex gap-2 items-center">
+                                            <div className="flex flex-col sm:flex-row gap-1 sm:gap-2 items-start sm:items-center">
                                                 <span className="text-slate-400 text-xs flex items-center gap-1 px-2">
                                                     <CheckCircle size={12} /> Paid
                                                 </span>
                                                 {onArchiveItem && (
-                                                    <button 
+                                                    <button
                                                         onClick={() => onArchiveItem('invoice', inv.id)}
                                                         className="text-slate-400 hover:text-amber-600 p-1.5 hover:bg-amber-50 rounded"
                                                         title="Archive"
@@ -695,6 +762,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                           })}
                     </tbody>
                 </table>
+                </div>
             </div>
           </div>
         )}
@@ -723,6 +791,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                      value={expenseStatusFilter}
                      onChange={(e) => setExpenseStatusFilter(e.target.value as any)}
                      className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-rose-500 focus:border-rose-500"
+                     aria-label="Filter expenses by status"
                    >
                      <option value="all">All Status</option>
                      <option value="Pending">Pending</option>
@@ -730,14 +799,12 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                      <option value="Rejected">Rejected</option>
                    </select>
 
-                   {!isHeadOffice && (
-                     <button
-                       onClick={() => setShowExpenseModal(true)}
-                       className="flex items-center gap-2 px-4 py-2 bg-rose-600 text-white rounded-lg hover:bg-rose-700 font-medium text-sm shadow-md shadow-rose-600/20"
-                     >
-                       <Plus size={16} /> Record Expense
-                     </button>
-                   )}
+                   <button
+                     onClick={() => setShowExpenseModal(true)}
+                     className="flex items-center gap-2 px-4 py-2 bg-rose-600 text-white rounded-lg hover:bg-rose-700 font-medium text-sm shadow-md shadow-rose-600/20"
+                   >
+                     <Plus size={16} /> Record Expense
+                   </button>
                  </div>
                </div>
 
@@ -869,28 +936,154 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
           </div>
         )}
 
-        {activeTab === 'tax' && (
-          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <div className="lg:col-span-2 bg-white p-8 rounded-2xl shadow-sm border border-slate-100">
-              <div className="flex justify-between items-start mb-8">
-                  <div>
-                      <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                          <Building size={24} className="text-teal-600" />
-                          TRA VAT Report {isHeadOffice && '(Consolidated)'}
-                      </h3>
-                      <p className="text-slate-500 text-sm mt-1">Tax Identification Number (TIN): 123-456-789</p>
-                  </div>
+        {activeTab === 'sales' && (
+          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+            {/* Sales Report Header */}
+            <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4 mb-6">
+              <h3 className="text-lg font-bold text-slate-800">Sales Report</h3>
+              <div className="flex flex-col sm:flex-row gap-3">
+                {/* Customer Search */}
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="Search customers..."
+                    value={salesCustomerSearch}
+                    onChange={(e) => setSalesCustomerSearch(e.target.value)}
+                    className="pl-9 pr-4 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                  />
+                  <svg className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                </div>
+
+                {/* Date Filters */}
+                <div className="flex gap-2">
+                  <input
+                    type="date"
+                    value={salesStartDate}
+                    onChange={(e) => setSalesStartDate(e.target.value)}
+                    className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                    placeholder="Start Date"
+                  />
+                  <input
+                    type="date"
+                    value={salesEndDate}
+                    onChange={(e) => setSalesEndDate(e.target.value)}
+                    className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                    placeholder="End Date"
+                  />
+                </div>
+
+                {/* Sort Options */}
+                <select
+                  value={salesSortBy}
+                  onChange={(e) => setSalesSortBy(e.target.value as any)}
+                  className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                  aria-label="Sort sales by"
+                >
+                  <option value="date">Sort by Date</option>
+                  <option value="name">Sort by Name</option>
+                  <option value="time">Sort by Time</option>
+                </select>
+
+                <select
+                  value={salesSortOrder}
+                  onChange={(e) => setSalesSortOrder(e.target.value as any)}
+                  className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                  aria-label="Sort order"
+                >
+                  <option value="desc">Descending</option>
+                  <option value="asc">Ascending</option>
+                </select>
+
+                <button
+                  onClick={handlePrintSalesReport}
+                  className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 font-medium text-sm shadow-sm transition-colors"
+                >
+                  <Download size={16} /> Export PDF
+                </button>
+                <button
+                  onClick={handleExportSales}
+                  className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 font-medium text-sm shadow-sm transition-colors"
+                >
+                  <FileBarChart size={16} /> Export Excel
+                </button>
               </div>
-              <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
-                  <div className="flex justify-between items-center mb-2">
-                      <span className="text-slate-600 font-medium">Total Taxable Value</span>
-                      <span className="font-bold text-slate-900">TZS {(stats.revenue * 0.82).toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
-                  </div>
-                  <div className="flex justify-between items-center mb-2">
-                      <span className="text-slate-600 font-medium">VAT Amount (18%)</span>
-                      <span className="font-bold text-slate-900">TZS {(stats.revenue * 0.18).toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
-                  </div>
+            </div>
+
+            {/* Sales Summary */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <p className="text-sm font-medium text-slate-500 mb-1">Total Sales</p>
+                <h3 className="text-2xl font-bold text-slate-800">{reportSales.length}</h3>
               </div>
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <p className="text-sm font-medium text-slate-500 mb-1">Total Revenue</p>
+                <h3 className="text-2xl font-bold text-slate-800">{reportSales.reduce((sum, s) => sum + s.totalAmount, 0).toLocaleString()} TZS</h3>
+              </div>
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <p className="text-sm font-medium text-slate-500 mb-1">Total Profit</p>
+                <h3 className="text-2xl font-bold text-slate-800">{reportSales.reduce((sum, s) => sum + s.profit, 0).toLocaleString()} TZS</h3>
+              </div>
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <p className="text-sm font-medium text-slate-500 mb-1">Avg Sale</p>
+                <h3 className="text-2xl font-bold text-slate-800">{reportSales.length > 0 ? (reportSales.reduce((sum, s) => sum + s.totalAmount, 0) / reportSales.length).toFixed(0) : 0} TZS</h3>
+              </div>
+            </div>
+
+            {/* Sales Table */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left min-w-[800px]">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Sale ID</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Date</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Time</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Customer</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Amount</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Profit</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Payment</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {reportSales.map((sale) => (
+                      <tr key={sale.id} className="hover:bg-slate-50">
+                        <td className="px-6 py-4 font-mono text-sm text-slate-600">{sale.id}</td>
+                        <td className="px-6 py-4 text-slate-600">{new Date(sale.date).toLocaleDateString()}</td>
+                        <td className="px-6 py-4 text-slate-600">{new Date(sale.date).toLocaleTimeString()}</td>
+                        <td className="px-6 py-4 text-slate-800 font-medium">{sale.customerName}</td>
+                        <td className="px-6 py-4 font-bold text-slate-800">{sale.totalAmount.toLocaleString()} TZS</td>
+                        <td className="px-6 py-4 text-emerald-600 font-medium">{sale.profit.toLocaleString()} TZS</td>
+                        <td className="px-6 py-4">
+                          <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs font-medium">
+                            {sale.paymentMethod}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <button
+                            onClick={() => {
+                              setSelectedSale(sale);
+                              setShowSalesPreview(true);
+                            }}
+                            className="text-teal-600 hover:text-teal-800 p-1.5 hover:bg-teal-50 rounded"
+                            title="Preview Sale"
+                          >
+                            <Eye size={16} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {reportSales.length === 0 && (
+                <div className="p-8 text-center text-slate-500">
+                  <FileText size={48} className="mx-auto mb-4 opacity-30" />
+                  <p>No sales found for the selected criteria.</p>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -910,16 +1103,6 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
             <div className="bg-white rounded-2xl w-full max-w-md p-6">
                 <h3 className="text-xl font-bold text-slate-900 mb-1">Record Payment</h3>
                 <p className="text-sm text-slate-500 mb-4">For Invoice #{selectedInvoice.id}</p>
-                <div className="p-3 bg-slate-50 rounded-lg mb-4 text-sm">
-                    <div className="flex justify-between mb-1">
-                        <span>Total Due:</span>
-                        <span className="font-bold">{selectedInvoice.totalAmount.toLocaleString()}</span>
-                    </div>
-                    <div className="flex justify-between text-rose-600">
-                        <span>Remaining Balance:</span>
-                        <span className="font-bold">{(selectedInvoice.totalAmount - selectedInvoice.paidAmount).toLocaleString()}</span>
-                    </div>
-                </div>
                 <div className="space-y-4">
                     <div>
                         <label className="text-sm font-medium text-slate-700">Receipt Number (System Generated)</label>
@@ -937,10 +1120,10 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                     <div>
                         <label className="text-sm font-medium text-slate-700">Payment Amount</label>
                         <div className="relative">
-                            <DollarSign size={16} className="absolute left-3 top-3 text-slate-400" />
-                            <input 
-                              type="number" 
-                              className="w-full pl-9 p-2 border border-slate-300 rounded-lg font-bold" 
+                            <span className="absolute left-3 top-3 text-slate-400 text-sm">TZS</span>
+                            <input
+                              type="number"
+                              className="w-full pl-9 p-2 border border-slate-300 rounded-lg font-bold"
                               placeholder="0.00"
                               value={newPayment.amount}
                               onChange={e => setNewPayment({...newPayment, amount: e.target.value})}
@@ -948,11 +1131,36 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                         </div>
                     </div>
                     <div>
-                         <label className="text-sm font-medium text-slate-700">Payment Method</label>
-                         <select 
+                        <label className="text-sm font-medium text-slate-700">Discount (%)</label>
+                        <div className="relative">
+                            <span className="absolute left-3 top-3 text-slate-400 text-sm">%</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="0.1"
+                              className="w-full pl-9 p-2 border border-slate-300 rounded-lg"
+                              placeholder="0.0"
+                              value={newPayment.discount}
+                              onChange={e => setNewPayment({...newPayment, discount: e.target.value})}
+                            />
+                        </div>
+                    </div>
+                    <div>
+                        <label className="text-sm font-medium text-slate-700">Amount Deducted</label>
+                        <div className="relative">
+                            <div className="w-full pl-3 p-2 border border-slate-300 rounded-lg bg-slate-50 text-slate-700 font-bold text-center">
+                                {`${((parseFloat(newPayment.amount) || 0) * (parseFloat(newPayment.discount) || 0) / 100).toFixed(2)} TZS`}
+                            </div>
+                        </div>
+                    </div>
+                    <div>
+                         <label className="text-sm font-medium text-slate-700" id="payment-method-label">Payment Method</label>
+                         <select
                             className="w-full p-2 border border-slate-300 rounded-lg"
                             value={newPayment.method}
                             onChange={(e) => setNewPayment({...newPayment, method: e.target.value as PaymentMethod})}
+                            aria-labelledby="payment-method-label"
                          >
                             <option value={PaymentMethod.CASH}>Cash</option>
                             <option value={PaymentMethod.MOBILE_MONEY}>Mobile Money</option>
@@ -972,7 +1180,48 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
         showPreviewModal={showPreviewModal}
         setShowPreviewModal={setShowPreviewModal}
         selectedInvoice={selectedInvoice}
-        handlePrintInvoice={handlePrintInvoice}
+        handlePrintInvoice={() => {
+          // Close modal first
+          setShowPreviewModal(false);
+          // Generate and print invoice
+          if (selectedInvoice) {
+            const customerInfo = {
+              name: selectedInvoice.customerName,
+              address: '',
+              email: selectedInvoice.customerEmail || '',
+              phone: selectedInvoice.customerPhone || ''
+            };
+            const invoiceData = {
+              id: selectedInvoice.id,
+              dateIssued: selectedInvoice.dateIssued || '',
+              client: customerInfo,
+              items: (selectedInvoice.items || []).map(item => ({
+                description: item.name || 'Item',
+                quantity: item.quantity,
+                price: item.price,
+                total: item.price * item.quantity
+              })),
+              subtotal: selectedInvoice.totalAmount || 0,
+              tax: 0,
+              total: selectedInvoice.totalAmount || 0,
+              paymentTerms: selectedInvoice.description || 'Payment due upon receipt',
+              paymentMethod: selectedInvoice.paymentMethod || 'Cash'
+            };
+            const companySettings = {
+              companyName: settings.find(s => s.settingKey === 'companyName')?.settingValue || 'PMS Pharmacy',
+              logo: settings.find(s => s.settingKey === 'logo')?.settingValue || '/backend_php/uploads/logos/logo.png',
+              address: settings.find(s => s.settingKey === 'address')?.settingValue || 'Bagamoyo Road, Dar es Salaam, Tanzania'
+            };
+            import('react-dom/server').then(({ renderToStaticMarkup }) => {
+              import('../components/ModernInvoicePrintTemplate').then(({ default: ModernInvoicePrintTemplate }) => {
+                const html = renderToStaticMarkup(
+                  <ModernInvoicePrintTemplate invoice={invoiceData} companySettings={companySettings} />
+                );
+                openCustomPrint(html, 'Invoice Print');
+              });
+            });
+          }
+        }}
         openPaymentModal={openPaymentModal}
       />
 
@@ -984,143 +1233,68 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
         handleRecordExpense={handleRecordExpense}
       />
 
-      {/* Print View Hidden on Screen - Visible only during print via CSS class */}
-      <div className="print-only">
-            <style>
-                {`
-                @media print {
-                    .print-only {
-                        page-break-inside: avoid;
-                        page-break-before: always;
-                        page-break-after: always;
-                    }
-                    .print-only * {
-                        -webkit-print-color-adjust: exact !important;
-                        color-adjust: exact !important;
-                    }
-                    body {
-                        margin: 0;
-                        padding: 0;
-                    }
-                    @page {
-                        size: A4;
-                        margin: 1cm;
-                    }
-                }
-                `}
-            </style>
-            {(() => {
-                const companyInfo = getCompanyInfo();
-                return (
-                    <div className="max-w-4xl mx-auto border border-black p-8 text-black" style={{minHeight: '29.7cm', maxHeight: '29.7cm'}}>
-                         {/* Header */}
-                         <div className="text-center mb-8">
-                             <img src={companyInfo.logo} alt={`${companyInfo.companyName} Logo`} className="h-20 w-auto mx-auto mb-4" />
-                             <h1 className="text-3xl font-bold uppercase tracking-wider mb-2">{companyInfo.companyName}</h1>
-                             <div className="text-sm space-y-1">
-                                 <p>TIN: {companyInfo.tinNumber} | VRN: {companyInfo.vrnNumber}</p>
-                                 <p>{companyInfo.address}</p>
-                                 <p>Tel: {companyInfo.phone} | Email: {companyInfo.email}</p>
-                             </div>
-                         </div>
-
-                <hr className="border-black my-6"/>
-                <div className="flex justify-between items-start mb-6">
-                    <div className="flex-1">
-                        <h2 className="text-2xl font-bold mb-4">{selectedInvoice?.status === 'PAID' ? 'TAX INVOICE' : 'PROFORMA INVOICE'}</h2>
-                        <div className="space-y-2 text-sm">
-                            <p><span className="font-semibold">Invoice #:</span> {selectedInvoice?.id || '---'}</p>
-                            <p><span className="font-semibold">Date Issued:</span> {selectedInvoice?.dateIssued || new Date().toISOString().split('T')[0]}</p>
-                            <p><span className="font-semibold">Due Date:</span> {selectedInvoice?.dueDate || '---'}</p>
-                            {selectedInvoice?.paymentMethod && (
-                                <p><span className="font-semibold">Payment Method:</span> {selectedInvoice.paymentMethod}</p>
-                            )}
-                        </div>
-                    </div>
-                    <div className="text-right flex-1">
-                        <div className="border border-black p-4 inline-block">
-                            <h3 className="font-bold mb-2">Bill To:</h3>
-                            <p className="text-lg font-semibold">{selectedInvoice?.customerName}</p>
-                            <p className="text-sm mt-2">Customer ID: {selectedInvoice?.customerName.split(' ').join('').toUpperCase()}</p>
-                        </div>
-                        <div className="mt-4 text-right">
-                            <span className={`inline-block px-4 py-2 border border-black text-sm font-bold ${selectedInvoice?.status === 'PAID' ? 'bg-gray-100' : ''}`}>
-                                Status: {selectedInvoice?.status || 'UNPAID'}
-                            </span>
-                        </div>
-                    </div>
+      {/* Sales Preview Modal */}
+      {showSalesPreview && selectedSale && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 no-print">
+          <div className="bg-white rounded-lg w-full max-w-full sm:max-w-md md:max-w-2xl lg:max-w-2xl max-h-[90vh] overflow-y-auto m-2 md:m-4">
+            <div className="p-6 border-b border-slate-100">
+              <div className="flex justify-between items-center">
+                <h3 className="text-xl font-bold text-slate-900">Sale Details - {selectedSale.id}</h3>
+                <button
+                  onClick={() => setShowSalesPreview(false)}
+                  className="text-slate-400 hover:text-slate-600"
+                  title="Close"
+                  aria-label="Close preview"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Date</label>
+                  <p className="text-slate-900">{new Date(selectedSale.date).toLocaleDateString()}</p>
                 </div>
-                <hr className="border-black my-6"/>
-                <table className="w-full text-left mb-8 border-collapse">
-                    <thead>
-                        <tr className="border-b-2 border-black">
-                            <th className="py-3 px-2 text-left font-bold">Item Description</th>
-                            <th className="py-3 px-2 text-center font-bold">Qty</th>
-                            <th className="py-3 px-2 text-right font-bold">Unit Price</th>
-                            <th className="py-3 px-2 text-right font-bold">Total</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {selectedInvoice?.items && selectedInvoice.items.length > 0 ? selectedInvoice.items.map((item, idx) => (
-                             <tr key={idx} className="border-b border-gray-300">
-                                 <td className="py-3 px-2 font-medium">{item.name}</td>
-                                 <td className="py-3 px-2 text-center">{item.quantity}</td>
-                                 <td className="py-3 px-2 text-right">{item.price.toLocaleString()}</td>
-                                 <td className="py-3 px-2 text-right font-semibold">{(item.price * item.quantity).toLocaleString()}</td>
-                             </tr>
-                        )) : (
-                            <tr>
-                                <td colSpan={4} className="py-6 px-2 text-center font-medium">Consolidated Invoice Items</td>
-                            </tr>
-                        )}
-                    </tbody>
-                </table>
-                <hr className="border-black my-6"/>
-                <div className="flex justify-end">
-                    <div className="w-80 space-y-3 text-sm">
-                        {selectedInvoice?.includeVAT ? (
-                            <>
-                                <div className="flex justify-between">
-                                    <span>Subtotal:</span>
-                                    <span>{(selectedInvoice?.totalAmount ? (selectedInvoice.totalAmount / 1.18).toFixed(0) : '0')}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                    <span>VAT (18%):</span>
-                                    <span>{(selectedInvoice?.totalAmount ? (selectedInvoice.totalAmount - (selectedInvoice.totalAmount / 1.18)).toFixed(0) : '0')}</span>
-                                </div>
-                            </>
-                        ) : (
-                            <div className="flex justify-between">
-                                <span>Amount:</span>
-                                <span>{selectedInvoice?.totalAmount.toLocaleString()}</span>
-                            </div>
-                        )}
-                        <div className="flex justify-between font-bold text-lg border-t border-black pt-3">
-                            <span>Grand Total:</span>
-                            <span>{selectedInvoice?.totalAmount.toLocaleString()} TZS</span>
-                        </div>
-                        <div className="flex justify-between text-sm">
-                            <span>Amount Paid:</span>
-                            <span>- {selectedInvoice?.paidAmount.toLocaleString()}</span>
-                        </div>
-                        <div className="flex justify-between font-bold border-t border-black pt-2">
-                            <span>Balance Due:</span>
-                            <span>{((selectedInvoice?.totalAmount || 0) - (selectedInvoice?.paidAmount || 0)).toLocaleString()} TZS</span>
-                        </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Time</label>
+                  <p className="text-slate-900">{new Date(selectedSale.date).toLocaleTimeString()}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Customer</label>
+                  <p className="text-slate-900">{selectedSale.customerName}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Payment Method</label>
+                  <p className="text-slate-900">{selectedSale.paymentMethod}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Total Amount</label>
+                  <p className="text-slate-900 font-bold">{selectedSale.totalAmount.toLocaleString()} TZS</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-500">Profit</label>
+                  <p className="text-emerald-600 font-bold">{selectedSale.profit.toLocaleString()} TZS</p>
+                </div>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-500">Items</label>
+                <div className="mt-2 space-y-2">
+                  {selectedSale.items.map((item, index) => (
+                    <div key={index} className="flex justify-between items-center p-3 bg-slate-50 rounded-lg">
+                      <div>
+                        <p className="font-medium text-slate-900">{item.name}</p>
+                        <p className="text-sm text-slate-500">Qty: {item.quantity}</p>
+                      </div>
+                      <p className="font-bold text-slate-900">{(item.price * item.quantity).toLocaleString()} TZS</p>
                     </div>
+                  ))}
                 </div>
-                {selectedInvoice?.status === 'PAID' && (
-                     <div className="mt-6 text-center border-2 border-black p-3 font-bold text-lg">PAID IN FULL</div>
-                )}
-                <div className="mt-12 text-center text-sm border-t border-black pt-6">
-                    <p className="font-semibold">Thank you for your business!</p>
-                    <p className="mt-2 text-xs">This is a computer-generated invoice and does not require a signature.</p>
-                    <p className="mt-1 text-xs">For inquiries, contact us at {companyInfo.phone}</p>
-                </div>
-                   </div>
-               );
-           })()}
-      </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1128,11 +1302,11 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
 const StatCard = ({ title, value, subtext, icon: Icon, color }: any) => (
   <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
     <div className="flex items-start justify-between">
-      <div>
+      <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-slate-500 mb-1">{title}</p>
-        <h3 className="text-2xl font-bold text-slate-800">{value}</h3>
+        <h3 className="text-xl font-bold text-slate-800 break-words">{value}</h3>
       </div>
-      <div className={`p-3 rounded-lg ${color}`}>
+      <div className={`p-3 rounded-lg ${color} flex-shrink-0`}>
         <Icon size={24} className="text-white" />
       </div>
     </div>

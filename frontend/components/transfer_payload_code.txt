@@ -1,0 +1,17 @@
+
+        // Transform to backend format - backend expects fromBranchId, toBranchId, products (JSON)
+        const transferPayload = {
+            fromBranchId: currentBranchId,
+            toBranchId: newShipment.targetBranchId,
+            products: JSON.stringify(newShipment.items.map((item: any) => ({
+                productId: item.productId,
+                productName: products.find(p => p.id === item.productId)?.name || "Unknown",
+                quantity: parseInt(item.quantity) || 0,
+                price: products.find(p => p.id === item.productId)?.price || 0
+            }))),
+            notes: newShipment.notes?.trim() || ""
+        };
+
+        try {
+            // Call API with transformed payload
+            await api.createTransfer(transferPayload);

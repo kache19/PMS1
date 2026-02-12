@@ -1,0 +1,57 @@
+# PHP Generated Files
+*.php_tmp
+*.phtml~
+
+# Composer
+vendor/
+composer.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment & Config
+.env
+.env.local
+.env.*.php
+
+# Logs & Uploads
+error_log
+*.log
+uploads/
+temp/
+cache/
+
+# Backup files
+*.sql.bak
+*.backup
+*.tar.gz
+*.zip
+
+# System files
+Thumbs.db
+._*
+.Spotlight-V100
+.Trashes
+
+# Testing
+test_*.php
+!test_invoice.php
+!test_email_feature.php
+!test_connection.php
+!test_db.php
+!test_insert_customer.php
+
+# Security
+config/database.php
+config/mail.php
+fix_admin_password.php
+
+# Node modules (for frontend)
+node_modules/
+dist/
+build/

@@ -29,7 +29,9 @@ import {
   CheckSquare,
   Square,
   FileText,
-  BarChart3
+  BarChart3,
+  Trash2,
+  AlertCircle
 } from 'lucide-react';
 import { Staff as StaffType, UserRole, Branch, AuditLog } from '../types';
 import { api } from '../services/api';
@@ -39,12 +41,14 @@ interface StaffProps {
     currentBranchId: string;
     branches: Branch[];
     staffList?: StaffType[];
+    currentUser?: StaffType | null;
     onAddStaff?: (staff: StaffType) => void;
     onUpdateStaff?: (staff: StaffType) => void;
 }
 
-const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: propStaffList = [], onAddStaff, onUpdateStaff }) => {
-  const { showSuccess, showError } = useNotifications();
+const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: propStaffList = [], currentUser, onAddStaff, onUpdateStaff }) => {
+  const { showSuccess, showError, showInfo } = useNotifications();
+  const [creationInfoMessage, setCreationInfoMessage] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [staffList, setStaffList] = useState<StaffType[]>(propStaffList);
   const [isLoading, setIsLoading] = useState(true);
@@ -59,6 +63,8 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
   const [showExportModal, setShowExportModal] = useState(false);
   const [showPermissionsModal, setShowPermissionsModal] = useState(false);
   const [selectedRoleForPermissions, setSelectedRoleForPermissions] = useState<UserRole | null>(null);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [staffToDelete, setStaffToDelete] = useState<StaffType | null>(null);
 
   // Branch and role helpers
   const currentBranch = branches.find(b => b.id === currentBranchId);
@@ -100,6 +106,91 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
   // Analytics States
   const [staffActivity, setStaffActivity] = useState<AuditLog[]>([]);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  
+  // Email Validation States
+  const [createEmailValidation, setCreateEmailValidation] = useState<{
+    isValid: boolean;
+    isDuplicate: boolean;
+    message: string;
+  }>({ isValid: false, isDuplicate: false, message: '' });
+
+  const [editEmailValidation, setEditEmailValidation] = useState<{
+    isValid: boolean;
+    isDuplicate: boolean;
+    message: string;
+  }>({ isValid: false, isDuplicate: false, message: '' });
+
+  // Email validation function - RFC 5322 simplified regex
+  const validateEmailFormat = (email: string): boolean => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  };
+
+  // Handle email change for create form
+  const handleCreateEmailChange = (email: string) => {
+    setNewStaff({ ...newStaff, email });
+    
+    if (!email.trim()) {
+      setCreateEmailValidation({ isValid: false, isDuplicate: false, message: '' });
+      return;
+    }
+
+    const isValidFormat = validateEmailFormat(email);
+    const isDuplicate = checkEmailDuplicate(email);
+
+    if (!isValidFormat) {
+      setCreateEmailValidation({
+        isValid: false,
+        isDuplicate: false,
+        message: 'Invalid email format'
+      });
+    } else if (isDuplicate) {
+      setCreateEmailValidation({
+        isValid: false,
+        isDuplicate: true,
+        message: 'Email address already in use'
+      });
+    } else {
+      setCreateEmailValidation({
+        isValid: true,
+        isDuplicate: false,
+        message: 'Email is valid'
+      });
+    }
+  };
+
+  // Handle email change for edit form
+  const handleEditEmailChange = (email: string) => {
+    setEditingStaff(editingStaff ? { ...editingStaff, email } : null);
+    
+    if (!email.trim()) {
+      setEditEmailValidation({ isValid: false, isDuplicate: false, message: '' });
+      return;
+    }
+
+    const isValidFormat = validateEmailFormat(email);
+    const isDuplicate = checkEmailDuplicate(email, editingStaff?.id);
+
+    if (!isValidFormat) {
+      setEditEmailValidation({
+        isValid: false,
+        isDuplicate: false,
+        message: 'Invalid email format'
+      });
+    } else if (isDuplicate) {
+      setEditEmailValidation({
+        isValid: false,
+        isDuplicate: true,
+        message: 'Email address already in use'
+      });
+    } else {
+      setEditEmailValidation({
+        isValid: true,
+        isDuplicate: false,
+        message: 'Email is valid'
+      });
+    }
+  };
   
   // Form States
   const [newStaff, setNewStaff] = useState<Partial<StaffType>>({
@@ -238,7 +329,16 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
         onAddStaff(createdStaff);
       }
 
+      // Show creation success
       showSuccess('Staff Member Added', `${createdStaff.name} has been successfully added to the database.`);
+
+      // If backend returned an email delivery message, surface it to the user
+      if (createdStaff && (createdStaff as any).message) {
+        showInfo('Email', (createdStaff as any).message, 6000);
+        setCreationInfoMessage((createdStaff as any).message);
+        // Clear inline banner after 6s
+        setTimeout(() => setCreationInfoMessage(null), 6000);
+      }
       setShowAddModal(false);
 
       // Refresh the staff list to ensure it reflects the latest data
@@ -253,14 +353,42 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
         username: '',
         password: ''
       });
-    } catch (error) {
-      // Error logged silently as per user request
+      setCreateEmailValidation({ isValid: false, isDuplicate: false, message: '' });
+    } catch (error: any) {
+      console.error('Failed to add staff:', error);
+      showError('Create Staff Failed', error?.message || 'An error occurred while creating staff.');
       return;
     }
   };
 
   const handleUpdateStaff = async () => {
       if (!editingStaff) return;
+
+      // Validation checks
+      if (!editingStaff.name || !editingStaff.name.trim()) {
+        showError('Missing Name', 'Please enter the staff member\'s name.');
+        return;
+      }
+
+      if (!editingStaff.role) {
+        showError('Missing Role', 'Please select a role for this staff member.');
+        return;
+      }
+
+      if (!editingStaff.branchId) {
+        showError('Missing Branch', 'Please select a branch assignment.');
+        return;
+      }
+
+      // Check email validation if email was provided
+      if (editingStaff.email && !editingStaff.email.trim()) {
+        // Empty email is okay, but if provided must be valid
+      } else if (editingStaff.email && editingStaff.email.trim()) {
+        if (!editEmailValidation.isValid) {
+          showError('Invalid Email', editEmailValidation.message || 'Please provide a valid email address.');
+          return;
+        }
+      }
 
       try {
         const updatedStaff = await api.updateStaff(editingStaff.id, editingStaff);
@@ -281,18 +409,46 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
 
         setShowEditModal(false);
         setEditingStaff(null);
+        setEditEmailValidation({ isValid: false, isDuplicate: false, message: '' });
 
         // Refresh the staff list
         await loadStaffData();
       } catch (error) {
         console.error('Failed to update staff:', error);
-        // Failure notification removed as per user request
+        showError('Update Failed', `Failed to update staff member: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     };
 
   const openEditModal = (staffMember: StaffType) => {
-      setEditingStaff({ ...staffMember });
+      const staffToEdit = { ...staffMember };
+      // Ensure branchId has a valid value
+      if (!staffToEdit.branchId && branches.length > 0) {
+        staffToEdit.branchId = branches[0].id;
+      }
+      setEditingStaff(staffToEdit);
+      // Initialize email validation for the editing staff
+      if (staffMember.email && staffMember.email.trim()) {
+        const isValidFormat = validateEmailFormat(staffMember.email);
+        const isDuplicate = checkEmailDuplicate(staffMember.email, staffMember.id);
+        setEditEmailValidation({
+          isValid: isValidFormat && !isDuplicate,
+          isDuplicate: isDuplicate,
+          message: isDuplicate ? 'Email already in use' : isValidFormat ? 'Email is valid' : 'Invalid email format'
+        });
+      } else {
+        setEditEmailValidation({ isValid: false, isDuplicate: false, message: '' });
+      }
       setShowEditModal(true);
+  };
+
+  // Inline banner component for quick info after creation
+  const CreationInfoBanner: React.FC = () => {
+    if (!creationInfoMessage) return null;
+    return (
+      <div className="mb-4 p-3 rounded-lg bg-blue-50 border border-blue-200 text-sm text-blue-800">
+        <strong>Email:</strong> {creationInfoMessage}
+      </div>
+    );
   };
 
   const toggleStatus = async (id: string) => {
@@ -318,6 +474,25 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
           showError('Update Failed', 'Failed to update staff status in the database. Please try again.');
         }
     };
+
+  const deleteStaff = async (id: string) => {
+    try {
+      await api.deleteStaff(id);
+      
+      // Remove from local list
+      setStaffList(prevList => prevList.filter(s => s.id !== id));
+      
+      // Reload staff data to ensure consistency
+      await loadStaffData();
+      
+      showSuccess('Staff Deleted', `Staff member has been successfully deleted from the database.`);
+      setShowDeleteModal(false);
+      setStaffToDelete(null);
+    } catch (error) {
+      console.error('Failed to delete staff:', error);
+      showError('Delete Failed', 'Failed to delete staff member. Please try again.');
+    }
+  };
 
   const getRoleBadgeColor = (role: UserRole) => {
       switch(role) {
@@ -401,30 +576,8 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
   const loadStaffAnalytics = async (staffId: string) => {
     setAnalyticsLoading(true);
     try {
-      // This would typically fetch from an API endpoint
-      // For now, we'll simulate with mock data
-      const mockActivity: AuditLog[] = [
-        {
-          id: 1,
-          userId: staffId,
-          userName: staffList.find(s => s.id === staffId)?.name || 'Unknown',
-          action: 'LOGIN',
-          entityType: 'AUTH',
-          timestamp: new Date().toISOString(),
-          severity: 'INFO'
-        },
-        {
-          id: 2,
-          userId: staffId,
-          userName: staffList.find(s => s.id === staffId)?.name || 'Unknown',
-          action: 'SALE_CREATED',
-          entityType: 'SALE',
-          entityId: 'SALE-001',
-          timestamp: new Date(Date.now() - 3600000).toISOString(),
-          severity: 'INFO'
-        }
-      ];
-      setStaffActivity(mockActivity);
+      const activity = await api.getAuditLogs({ userId: staffId, limit: 50 });
+      setStaffActivity(activity);
     } catch (error) {
       showError('Failed to Load Analytics', 'Could not load staff activity data.');
     } finally {
@@ -571,6 +724,23 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
           'View basic inventory levels',
           'Generate daily sales reports'
         ]
+      },
+      [UserRole.AUDITOR]: {
+        description: 'Full module access with global branch authorization for shipment verification',
+        permissions: [
+          'View dashboard summary',
+          'Access inventory module',
+          'View shipment details',
+          'Verify shipments for sale readiness',
+          'Access clinical & Rx module',
+          'View and manage finances',
+          'View inventory reports',
+          'View customer and supplier information',
+          'Access reports and archive',
+          'View all branches and access data across system',
+          'No access to POS (Point of Sale)',
+          'No access to Staff Management or Settings'
+        ]
       }
     };
     return permissions[role] || { description: 'No permissions defined', permissions: [] };
@@ -612,6 +782,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
           </button>
         </div>
       </div>
+      <CreationInfoBanner />
 
       {/* Toolbar */}
       <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 space-y-4">
@@ -803,13 +974,25 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                              >
                                  <BarChart3 size={18} />
                              </button>
-                             {isHeadOffice && (
+                             {(currentUser?.role === UserRole.SUPER_ADMIN || isHeadOffice) && (
                                  <button
                                    onClick={() => openEditModal(member)}
                                    className="text-slate-400 hover:text-teal-600 hover:bg-teal-50 p-2 rounded-full transition-colors"
                                    title="Edit & Transfer"
                                  >
                                      <Edit size={18} />
+                                 </button>
+                             )}
+                             {(currentUser?.role === UserRole.SUPER_ADMIN || isHeadOffice) && (
+                                 <button
+                                   onClick={() => {
+                                     setStaffToDelete(member);
+                                     setShowDeleteModal(true);
+                                   }}
+                                   className="text-slate-400 hover:text-rose-600 hover:bg-rose-50 p-2 rounded-full transition-colors"
+                                   title="Delete Staff"
+                                 >
+                                     <Trash2 size={18} />
                                  </button>
                              )}
                            </div>
@@ -904,7 +1087,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                   
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-2">
+                        <label className="flex items-center gap-2 text-sm font-medium text-slate-700 mb-1">
                           Role
                           <button
                             type="button"
@@ -956,12 +1139,33 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                       <Mail size={16} className="absolute left-3 top-3 text-slate-400" />
                       <input
                           type="email"
-                          className="w-full pl-9 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:outline-none"
+                          className={`w-full pl-9 p-2 border rounded-lg focus:ring-2 focus:ring-teal-500 focus:outline-none transition-colors ${
+                            newStaff.email && createEmailValidation.isValid 
+                              ? 'border-emerald-300 bg-emerald-50' 
+                              : newStaff.email && (createEmailValidation.isDuplicate || !createEmailValidation.isValid)
+                              ? 'border-rose-300 bg-rose-50'
+                              : 'border-slate-300'
+                          }`}
                           placeholder="employee@pms.co.tz"
                           value={newStaff.email}
-                          onChange={(e) => setNewStaff({...newStaff, email: e.target.value})}
+                          onChange={(e) => handleCreateEmailChange(e.target.value)}
                       />
                   </div>
+                  {newStaff.email && (
+                    <p className={`text-xs mt-1.5 flex items-center gap-1.5 font-medium ${
+                      createEmailValidation.isValid ? 'text-emerald-600' : 'text-rose-600'
+                    }`}>
+                      {createEmailValidation.isValid ? (
+                        <>
+                          <CheckCircle size={14} /> {createEmailValidation.message}
+                        </>
+                      ) : (
+                        <>
+                          <XCircle size={14} /> {createEmailValidation.message}
+                        </>
+                      )}
+                    </p>
+                  )}
                 </div>
 
                   <div>
@@ -1022,7 +1226,20 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
 
                </div>
                <div className="p-6 bg-slate-50 flex justify-end gap-3">
-                  <button onClick={() => setShowAddModal(false)} className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-200 rounded-lg">Cancel</button>
+                  <button onClick={() => {
+                    setShowAddModal(false);
+                    setNewStaff({
+                      name: '',
+                      role: UserRole.DISPENSER,
+                      branchId: isHeadOffice ? '' : currentBranchId,
+                      email: '',
+                      phone: '',
+                      status: 'ACTIVE',
+                      username: '',
+                      password: ''
+                    });
+                    setCreateEmailValidation({ isValid: false, isDuplicate: false, message: '' });
+                  }} className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-200 rounded-lg">Cancel</button>
                   <button onClick={handleAddStaff} className="px-4 py-2 bg-teal-600 text-white font-medium hover:bg-teal-700 rounded-lg shadow-sm">Create User</button>
                </div>
             </div>
@@ -1059,15 +1276,29 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                              <label className="block text-sm font-bold text-slate-700 mb-1">Email</label>
                              <input
                                 type="email"
-                                className={`w-full p-2 border rounded-lg focus:ring-2 focus:ring-teal-500 outline-none text-sm ${
-                                  editingStaff.email && checkEmailDuplicate(editingStaff.email, editingStaff.id) ? 'border-rose-300 bg-rose-50' : 'border-slate-300'
+                                className={`w-full p-2 border rounded-lg focus:ring-2 focus:ring-teal-500 outline-none text-sm transition-colors ${
+                                  editingStaff.email && editEmailValidation.isValid 
+                                    ? 'border-emerald-300 bg-emerald-50' 
+                                    : editingStaff.email && (editEmailValidation.isDuplicate || !editEmailValidation.isValid)
+                                    ? 'border-rose-300 bg-rose-50'
+                                    : 'border-slate-300'
                                 }`}
                                 value={editingStaff.email}
-                                onChange={(e) => setEditingStaff({...editingStaff, email: e.target.value})}
+                                onChange={(e) => handleEditEmailChange(e.target.value)}
                              />
-                             {editingStaff.email && checkEmailDuplicate(editingStaff.email, editingStaff.id) && (
-                               <p className="text-xs text-rose-600 mt-1 flex items-center gap-1">
-                                 <XCircle size={12} /> This email address is already registered to another staff member
+                             {editingStaff.email && (
+                               <p className={`text-xs mt-1.5 flex items-center gap-1 font-medium ${
+                                 editEmailValidation.isValid ? 'text-emerald-600' : 'text-rose-600'
+                               }`}>
+                                 {editEmailValidation.isValid ? (
+                                   <>
+                                     <CheckCircle size={12} /> {editEmailValidation.message}
+                                   </>
+                                 ) : (
+                                   <>
+                                     <XCircle size={12} /> {editEmailValidation.message}
+                                   </>
+                                 )}
                                </p>
                              )}
                         </div>
@@ -1087,7 +1318,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                    {/* Role & Branch Transfer */}
                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-4">
                        <div>
-                           <label className="block text-xs font-bold text-slate-500 uppercase mb-2 flex items-center gap-2">
+                           <label className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase mb-2">
                                <Shield size={14} /> System Role
                                <button
                                  type="button"
@@ -1113,7 +1344,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                        </div>
 
                        <div>
-                           <label className="block text-xs font-bold text-slate-500 uppercase mb-2 flex items-center gap-2">
+                           <label className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase mb-2">
                                <ArrowRightLeft size={14} /> Branch Assignment (Transfer)
                            </label>
                            <select 
@@ -1147,8 +1378,28 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                </div>
 
                <div className="p-6 bg-slate-50 flex justify-end gap-3">
-                  <button onClick={() => setShowEditModal(false)} className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-200 rounded-lg">Cancel</button>
-                  <button onClick={handleUpdateStaff} className="px-6 py-2 bg-teal-600 text-white font-bold rounded-lg hover:bg-teal-700 shadow-sm flex items-center gap-2">
+                  <button onClick={() => {
+                    setShowEditModal(false);
+                    setEditingStaff(null);
+                    setEditEmailValidation({ isValid: false, isDuplicate: false, message: '' });
+                  }} className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-200 rounded-lg">Cancel</button>
+                  <button 
+                    onClick={handleUpdateStaff}
+                    disabled={
+                      !editingStaff.name || 
+                      !editingStaff.role || 
+                      !editingStaff.branchId ||
+                      (editingStaff.email && editingStaff.email.trim() && !editEmailValidation.isValid)
+                    }
+                    className={`px-6 py-2 font-bold rounded-lg shadow-sm flex items-center gap-2 transition-all ${
+                      !editingStaff.name || 
+                      !editingStaff.role || 
+                      !editingStaff.branchId ||
+                      (editingStaff.email && editingStaff.email.trim() && !editEmailValidation.isValid)
+                        ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                        : 'bg-teal-600 text-white hover:bg-teal-700'
+                    }`}
+                  >
                       <Save size={18} /> Save Changes
                   </button>
                </div>
@@ -1283,11 +1534,11 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
       {/* Analytics Modal */}
       {showAnalyticsModal && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl w-full max-w-2xl overflow-hidden animate-in fade-in zoom-in duration-200 max-h-[90vh] overflow-y-auto">
-            <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+          <div className="bg-white rounded-lg w-full max-w-full sm:max-w-md md:max-w-2xl lg:max-w-2xl overflow-hidden animate-in fade-in zoom-in duration-200 max-h-[90vh] overflow-y-auto">
+            <div className="p-3 md:p-4 lg:p-6 border-b border-slate-100 flex justify-between items-center">
               <div>
-                <h3 className="text-xl font-bold text-slate-900">Staff Analytics</h3>
-                <p className="text-slate-500 text-sm">Activity overview and performance metrics</p>
+                <h3 className="text-base md:text-lg lg:text-xl font-bold text-slate-900">Staff Analytics</h3>
+                <p className="text-slate-500 text-xs md:text-sm">Activity overview and performance metrics</p>
               </div>
               <button
                 onClick={() => setShowAnalyticsModal(false)}
@@ -1391,14 +1642,14 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
       {/* Role Permissions Modal */}
       {showPermissionsModal && selectedRoleForPermissions && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl w-full max-w-2xl overflow-hidden animate-in fade-in zoom-in duration-200 max-h-[90vh] overflow-y-auto">
-            <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+          <div className="bg-white rounded-lg w-full max-w-full sm:max-w-md md:max-w-2xl lg:max-w-2xl overflow-hidden animate-in fade-in zoom-in duration-200 max-h-[90vh] overflow-y-auto">
+            <div className="p-3 md:p-4 lg:p-6 border-b border-slate-100 flex justify-between items-center">
               <div>
-                <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                  <Shield size={24} className="text-teal-600" />
+                <h3 className="text-base md:text-lg lg:text-xl font-bold text-slate-900 flex items-center gap-2">
+                  <Shield size={18} className="text-teal-600" />
                   {selectedRoleForPermissions.replace('_', ' ')} Permissions
                 </h3>
-                <p className="text-slate-500 text-sm mt-1">
+                <p className="text-slate-500 text-xs md:text-sm mt-1">
                   {getRolePermissions(selectedRoleForPermissions).description}
                 </p>
               </div>
@@ -1406,7 +1657,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                 onClick={() => setShowPermissionsModal(false)}
                 className="text-slate-400 hover:text-slate-600 p-2"
               >
-                <XCircle size={24} />
+                <XCircle size={18} />
               </button>
             </div>
             <div className="p-6">
@@ -1434,6 +1685,61 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                 className="px-4 py-2 bg-teal-600 text-white font-medium hover:bg-teal-700 rounded-lg"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteModal && staffToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 bg-rose-100 rounded-xl flex items-center justify-center">
+                <AlertCircle size={24} className="text-rose-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Delete Staff Member?</h3>
+                <p className="text-sm text-slate-500">This action cannot be undone</p>
+              </div>
+            </div>
+
+            <div className="bg-rose-50 border border-rose-200 rounded-lg p-4 mb-6">
+              <p className="text-sm text-slate-700 mb-2">
+                <strong>Staff Member:</strong> {staffToDelete.name}
+              </p>
+              <p className="text-sm text-slate-700 mb-2">
+                <strong>Email:</strong> {staffToDelete.email}
+              </p>
+              <p className="text-sm text-slate-700">
+                <strong>Role:</strong> {staffToDelete.role.replace('_', ' ')}
+              </p>
+            </div>
+
+            <p className="text-sm text-slate-600 mb-6">
+              Are you sure you want to permanently delete <strong>{staffToDelete.name}</strong> from the system? This action cannot be reversed.
+            </p>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowDeleteModal(false);
+                  setStaffToDelete(null);
+                }}
+                className="flex-1 px-4 py-2 text-slate-600 font-medium hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (staffToDelete) {
+                    deleteStaff(staffToDelete.id);
+                  }
+                }}
+                className="flex-1 px-4 py-2 bg-rose-600 text-white font-medium hover:bg-rose-700 rounded-lg transition-colors shadow-sm"
+              >
+                Delete Permanently
               </button>
             </div>
           </div>

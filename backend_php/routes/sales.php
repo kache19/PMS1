@@ -48,6 +48,7 @@ function getSales() {
                 'totalAmount' => (float)$s['total_amount'],
                 'profit' => (float)$s['profit'],
                 'paymentMethod' => $s['payment_method'],
+                'customerName' => $s['customer_name'],
                 'status' => 'COMPLETED',
                 'items' => [] // In a real app, fetch items separately or via JOIN
             ];
@@ -118,22 +119,71 @@ function createSale() {
         $paymentMethod = $input['paymentMethod'] ?? '';
         $customerName = $input['customerName'] ?? '';
 
+        // If no ID provided, generate one in the format INV-<BRANCHPREFIX>-<YEAR>-<0001>
+        if (empty($id)) {
+            $year = date('Y');
+            // derive a branch prefix from branchId (numeric -> BR{zero-padded 3}), fallback to BR000
+            $branchPrefix = 'BR000';
+            if (!empty($branchId) && is_numeric($branchId)) {
+                $branchPrefix = sprintf('BR%03d', (int)$branchId);
+            }
+            $stmt = $pdo->prepare("SELECT MAX(CAST(SUBSTRING_INDEX(id, '-', -1) AS UNSIGNED)) as maxSeq FROM sales WHERE id LIKE ?");
+            $likePattern = "INV-" . $branchPrefix . "-" . $year . "-%";
+            $stmt->execute([$likePattern]);
+            $row = $stmt->fetch();
+            $maxSeq = $row && isset($row['maxSeq']) ? (int)$row['maxSeq'] : 0;
+            $nextSeq = $maxSeq + 1;
+            $id = sprintf('INV-%s-%s-%04d', $branchPrefix, $year, $nextSeq);
+        }
         $pdo->beginTransaction();
 
-        // 1. Check if sale already exists
-        $stmt = $pdo->prepare('SELECT id FROM sales WHERE id = ?');
-        $stmt->execute([$id]);
-        $existingSale = $stmt->fetch();
+        // Attempt to insert; handle rare duplicate-ID race by retrying with a new generated ID
+        $maxAttempts = 5;
+        $inserted = false;
+        for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
+            // Check if sale already exists
+            $stmt = $pdo->prepare('SELECT id FROM sales WHERE id = ?');
+            $stmt->execute([$id]);
+            $existingSale = $stmt->fetch();
 
-        if ($existingSale) {
-            $pdo->rollBack();
-            echo json_encode(['message' => 'Sale already exists', 'saleId' => $id]);
-            return;
+            if ($existingSale) {
+                $pdo->rollBack();
+                echo json_encode(['message' => 'Sale already exists', 'saleId' => $id]);
+                return;
+            }
+
+            try {
+                $stmt = $pdo->prepare('INSERT INTO sales (id, branch_id, total_amount, profit, payment_method, customer_name, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())');
+                $stmt->execute([$id, $branchId, $totalAmount, $profit, $paymentMethod, $customerName]);
+                $inserted = true;
+                break;
+            } catch (PDOException $e) {
+                // Duplicate entry? regenerate id and retry
+                if ($e->getCode() === '23000' || strpos($e->getMessage(), 'Duplicate') !== false) {
+                    // Duplicate entry — regenerate id for this branch/year and retry
+                    $year = date('Y');
+                    $branchPrefix = 'BR000';
+                    if (!empty($branchId) && is_numeric($branchId)) {
+                        $branchPrefix = sprintf('BR%03d', (int)$branchId);
+                    }
+                    $stmt = $pdo->prepare("SELECT MAX(CAST(SUBSTRING_INDEX(id, '-', -1) AS UNSIGNED)) as maxSeq FROM sales WHERE id LIKE ?");
+                    $likePattern = "INV-" . $branchPrefix . "-" . $year . "-%";
+                    $stmt->execute([$likePattern]);
+                    $row = $stmt->fetch();
+                    $maxSeq = $row && isset($row['maxSeq']) ? (int)$row['maxSeq'] : 0;
+                    $nextSeq = $maxSeq + 1 + $attempt; // bump using attempt as small offset
+                    $id = sprintf('INV-%s-%s-%04d', $branchPrefix, $year, $nextSeq);
+                    // continue loop
+                } else {
+                    throw $e;
+                }
+            }
         }
 
-        // Create Sale Record
-        $stmt = $pdo->prepare('INSERT INTO sales (id, branch_id, total_amount, profit, payment_method, customer_name, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())');
-        $stmt->execute([$id, $branchId, $totalAmount, $profit, $paymentMethod, $customerName]);
+        if (!$inserted) {
+            $pdo->rollBack();
+            throw new Exception('Failed to insert sale after multiple attempts');
+        }
 
         // 2. Process Items - Deduct from drug_batches table (FIFO)
         foreach ($items as $item) {
@@ -217,11 +267,70 @@ function processSale() {
         $paymentMethod = $input['paymentMethod'] ?? '';
         $customerName = $input['customerName'] ?? '';
 
+        // If no ID provided, generate one in the format INV-<BRANCHPREFIX>-<YEAR>-<0001>
+        if (empty($id)) {
+            $year = date('Y');
+            // derive a branch prefix from branchId (numeric -> BR{zero-padded 3}), fallback to BR000
+            $branchPrefix = 'BR000';
+            if (!empty($branchId) && is_numeric($branchId)) {
+                $branchPrefix = sprintf('BR%03d', (int)$branchId);
+            }
+            $stmt = $pdo->prepare("SELECT MAX(CAST(SUBSTRING_INDEX(id, '-', -1) AS UNSIGNED)) as maxSeq FROM sales WHERE id LIKE ?");
+            $likePattern = "INV-" . $branchPrefix . "-" . $year . "-%";
+            $stmt->execute([$likePattern]);
+            $row = $stmt->fetch();
+            $maxSeq = $row && isset($row['maxSeq']) ? (int)$row['maxSeq'] : 0;
+            $nextSeq = $maxSeq + 1;
+            $id = sprintf('INV-%s-%s-%04d', $branchPrefix, $year, $nextSeq);
+        }
         $pdo->beginTransaction();
 
-        // 1. Create Sale Record
-        $stmt = $pdo->prepare('INSERT INTO sales (id, branch_id, total_amount, profit, payment_method, customer_name, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())');
-        $stmt->execute([$id, $branchId, $totalAmount, $profit, $paymentMethod, $customerName]);
+        // Attempt to insert; handle duplicate-ID race by retrying
+        $maxAttempts = 5;
+        $inserted = false;
+        for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
+            // Check if sale already exists
+            $stmt = $pdo->prepare('SELECT id FROM sales WHERE id = ?');
+            $stmt->execute([$id]);
+            $existingSale = $stmt->fetch();
+
+            if ($existingSale) {
+                $pdo->rollBack();
+                echo json_encode(['message' => 'Sale already exists', 'saleId' => $id]);
+                return;
+            }
+
+            try {
+                $stmt = $pdo->prepare('INSERT INTO sales (id, branch_id, total_amount, profit, payment_method, customer_name, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())');
+                $stmt->execute([$id, $branchId, $totalAmount, $profit, $paymentMethod, $customerName]);
+                $inserted = true;
+                break;
+            } catch (PDOException $e) {
+                if ($e->getCode() === '23000' || strpos($e->getMessage(), 'Duplicate') !== false) {
+                    // Duplicate entry — regenerate id for this branch/year and retry
+                    $year = date('Y');
+                    $branchPrefix = 'BR000';
+                    if (!empty($branchId) && is_numeric($branchId)) {
+                        $branchPrefix = sprintf('BR%03d', (int)$branchId);
+                    }
+                    $stmt = $pdo->prepare("SELECT MAX(CAST(SUBSTRING_INDEX(id, '-', -1) AS UNSIGNED)) as maxSeq FROM sales WHERE id LIKE ?");
+                    $likePattern = "INV-" . $branchPrefix . "-" . $year . "-%";
+                    $stmt->execute([$likePattern]);
+                    $row = $stmt->fetch();
+                    $maxSeq = $row && isset($row['maxSeq']) ? (int)$row['maxSeq'] : 0;
+                    $nextSeq = $maxSeq + 1 + $attempt;
+                    $id = sprintf('INV-%s-%s-%04d', $branchPrefix, $year, $nextSeq);
+                    // continue loop
+                } else {
+                    throw $e;
+                }
+            }
+        }
+
+        if (!$inserted) {
+            $pdo->rollBack();
+            throw new Exception('Failed to insert sale after multiple attempts');
+        }
 
         // 2. Process Items - Deduct from drug_batches table (FIFO)
         foreach ($items as $item) {

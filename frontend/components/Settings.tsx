@@ -24,9 +24,10 @@ import {
   Smartphone,
   Eye,
   EyeOff,
-  Loader
+  Loader,
+  BarChart3
 } from 'lucide-react';
-import { BranchInventoryItem, Sale, Expense, Invoice, SystemSetting } from '../types';
+import { BranchInventoryItem, Sale, Expense, Invoice, SystemSetting, LoginTracker } from '../types';
 import { api, API_URL } from '../services/api';
 import { useNotifications } from './NotificationContext';
 
@@ -57,7 +58,7 @@ const Settings: React.FC<SettingsProps> = ({
   onLogout
 }) => {
   const { showSuccess, showError } = useNotifications();
-  const [activeSection, setActiveSection] = useState<'general' | 'security' | 'notifications' | 'integrations' | 'backup'>('general');
+  const [activeSection, setActiveSection] = useState<'general' | 'security' | 'notifications' | 'integrations' | 'backup' | 'loginTrackers'>('general');
   const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [saveMessage, setSaveMessage] = useState('');
@@ -71,12 +72,14 @@ const Settings: React.FC<SettingsProps> = ({
   // Settings state loaded from database
   const [settings, setSettings] = useState<SystemSetting[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [loginTrackers, setLoginTrackers] = useState<LoginTracker[]>([]);
+  const [trackerFilter, setTrackerFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [trackerDaysFilter, setTrackerDaysFilter] = useState(30);
 
   // General settings state
   const [general, setGeneral] = useState({
     companyName: 'PMS Pharmacy Ltd',
     tinNumber: '123-456-789',
-    vrnNumber: '400-999-111',
     address: 'Plot 45, Bagamoyo Road, Dar es Salaam',
     phone: '+255 700 123 456',
     email: 'info@pms.co.tz',
@@ -95,6 +98,7 @@ const Settings: React.FC<SettingsProps> = ({
     sessionTimeout: '15',
     passwordExpiry: '90',
     enforceStrongPasswords: true,
+    currentAdminPassword: '',
     adminPassword: '',
     confirmAdminPassword: ''
   });
@@ -118,23 +122,33 @@ const Settings: React.FC<SettingsProps> = ({
     apiKey: 'sk_live_51Mk...90xZ'
   });
 
+  // Backup settings state
+  const [autoBackupEnabled, setAutoBackupEnabled] = useState(true);
+  const [autoBackupTime, setAutoBackupTime] = useState('00:00');
+  const [backupRetentionDays, setBackupRetentionDays] = useState(30);
+  const [backupStatus, setBackupStatus] = useState<any>(null);
+  const [isSavingBackupSettings, setIsSavingBackupSettings] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const restoreInputRef = useRef<HTMLInputElement>(null);
 
-  // Load settings and sessions on mount
+  // Load settings and sessions on mount with real-time polling
   useEffect(() => {
     let mounted = true;
+    let pollingInterval: number | null = null;
 
     const loadData = async () => {
       try {
-        const [settingsData, sessionsData] = await Promise.all([
+        const [settingsData, sessionsData, trackersData] = await Promise.all([
           api.getSettings(),
-          Promise.resolve([])
+          Promise.resolve([]),
+          api.getLoginTrackers({ days: trackerDaysFilter })
         ]);
 
         if (!mounted) return;
 
         setSettings(settingsData || []);
+        setLoginTrackers(trackersData || []);
 
         // Mock sessions if API doesn't support it
         const activeSessions = sessionsData || [
@@ -168,7 +182,7 @@ const Settings: React.FC<SettingsProps> = ({
             ...prev,
             companyName: settingsData.find((s: any) => s.settingKey === 'companyName')?.settingValue || prev.companyName,
             tinNumber: settingsData.find((s: any) => s.settingKey === 'tinNumber')?.settingValue || prev.tinNumber,
-            vrnNumber: settingsData.find((s: any) => s.settingKey === 'vrnNumber')?.settingValue || prev.vrnNumber,
+            // VRN removed since VAT is disabled
             address: settingsData.find((s: any) => s.settingKey === 'address')?.settingValue || prev.address,
             phone: settingsData.find((s: any) => s.settingKey === 'phone')?.settingValue || prev.phone,
             email: settingsData.find((s: any) => s.settingKey === 'email')?.settingValue || prev.email,
@@ -221,28 +235,41 @@ const Settings: React.FC<SettingsProps> = ({
       }
     };
 
+    // Initial load
     loadData();
+
+    // Set up polling every 30 seconds
+    pollingInterval = setInterval(loadData, 30000) as unknown as number;
+
     return () => {
       mounted = false;
+      if (pollingInterval) {
+        clearInterval(pollingInterval);
+      }
     };
   }, []);
 
   const handleSave = async () => {
     // Validate passwords if changing admin password
-    if (security.adminPassword || security.confirmAdminPassword) {
+    const isChangingPassword = security.adminPassword || security.confirmAdminPassword;
+    if (isChangingPassword) {
+      if (!security.currentAdminPassword) {
+        showError('Validation Error', 'Current password is required to change password.');
+        return;
+      }
       if (security.adminPassword !== security.confirmAdminPassword) {
-        showError('Validation Error', 'Passwords do not match.');
+        showError('Validation Error', 'New passwords do not match.');
         return;
       }
       if (security.adminPassword.length < 8) {
-        showError('Validation Error', 'Password must be at least 8 characters.');
+        showError('Validation Error', 'New password must be at least 8 characters.');
         return;
       }
     }
 
     setIsSaving(true);
     try {
-      // Collect all settings to save
+      // Collect all settings to save (excluding password fields)
       const settingsToSave = [
         ...Object.entries(general)
           .filter(([key, v]) => v !== null && key !== 'logo')
@@ -250,7 +277,7 @@ const Settings: React.FC<SettingsProps> = ({
         // Save logo separately with relative path
         ...(logoPath ? [{ category: 'general', key: 'logo', value: logoPath }] : []),
         ...Object.entries(security)
-          .filter(([key]) => key !== 'adminPassword' && key !== 'confirmAdminPassword')
+          .filter(([key]) => key !== 'currentAdminPassword' && key !== 'adminPassword' && key !== 'confirmAdminPassword')
           .map(([key, value]) => ({ category: 'security', key, value: String(value) })),
         ...Object.entries(notifications)
           .map(([key, value]) => ({ category: 'notifications', key, value: String(value) })),
@@ -292,12 +319,37 @@ const Settings: React.FC<SettingsProps> = ({
 
       await Promise.all(savePromises);
 
+      // Change password if new password is provided
+      if (isChangingPassword) {
+        const token = localStorage.getItem('authToken') || sessionStorage.getItem('authToken');
+        if (!token) {
+          throw new Error('No authentication token found');
+        }
+
+        const passwordResponse = await fetch(`${API_URL}auth/change-password`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            currentPassword: security.currentAdminPassword,
+            newPassword: security.adminPassword
+          })
+        });
+
+        if (!passwordResponse.ok) {
+          const errorData = await passwordResponse.json();
+          throw new Error(errorData.error || 'Failed to change password');
+        }
+      }
+
       // Refresh settings from database to ensure UI reflects changes
       const updatedSettings = await api.getSettings();
       setSettings(updatedSettings || []);
 
       // Clear password fields after successful save
-      setSecurity(prev => ({ ...prev, adminPassword: '', confirmAdminPassword: '' }));
+      setSecurity(prev => ({ ...prev, currentAdminPassword: '', adminPassword: '', confirmAdminPassword: '' }));
 
       setSaveMessage('✓ Settings saved successfully!');
       showSuccess('Settings Updated', 'All system settings have been saved.');
@@ -305,7 +357,7 @@ const Settings: React.FC<SettingsProps> = ({
       setTimeout(() => setSaveMessage(''), 3000);
     } catch (error) {
       console.error('Failed to save settings:', error);
-      showError('Save Failed', 'There was an error saving the settings. Please try again.');
+      showError('Save Failed', error instanceof Error ? error.message : 'There was an error saving the settings. Please try again.');
     } finally {
       setIsSaving(false);
     }
@@ -330,12 +382,11 @@ const Settings: React.FC<SettingsProps> = ({
       const formData = new FormData();
       formData.append('logo', file);
 
+      const token = localStorage.getItem('authToken') || sessionStorage.getItem('authToken');
       const response = await fetch(`${API_URL}settings?action=upload-logo`, {
         method: 'POST',
         body: formData,
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`
-        }
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
       });
 
       if (!response.ok) {
@@ -526,6 +577,51 @@ const Settings: React.FC<SettingsProps> = ({
     }
   };
 
+  const handleSaveBackupSettings = async () => {
+    setIsSavingBackupSettings(true);
+    try {
+      const response = await api.scheduleAutoBackup({
+        enabled: autoBackupEnabled,
+        backupTime: autoBackupTime,
+        retentionDays: backupRetentionDays
+      });
+
+      if (response.success) {
+        showSuccess('Auto-Backup Settings Saved', `Daily automatic backups enabled at ${autoBackupTime}`);
+      } else {
+        throw new Error(response.error || 'Failed to save settings');
+      }
+    } catch (error) {
+      console.error('Failed to save backup settings:', error);
+      showError('Save Failed', 'Unable to save auto-backup settings. Please try again.');
+    } finally {
+      setIsSavingBackupSettings(false);
+    }
+  };
+
+  const handleLoadBackupStatus = async () => {
+    try {
+      const status = await api.getBackupStatus();
+      setBackupStatus(status);
+      
+      // Update UI with loaded settings
+      if (status.autoBackupEnabled) {
+        setAutoBackupEnabled(true);
+        setAutoBackupTime(status.autoBackupTime);
+        setBackupRetentionDays(status.backupRetentionDays);
+      }
+    } catch (error) {
+      console.error('Failed to load backup status:', error);
+    }
+  };
+
+  // Load backup status when backup section is active
+  useEffect(() => {
+    if (activeSection === 'backup') {
+      handleLoadBackupStatus();
+    }
+  }, [activeSection]);
+
   const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
     <button
       onClick={() => onChange(!checked)}
@@ -598,6 +694,7 @@ const Settings: React.FC<SettingsProps> = ({
             <SectionButton id="security" label="Security & Access" icon={Shield} />
             <SectionButton id="notifications" label="Notifications" icon={Bell} />
             <SectionButton id="integrations" label="Integrations" icon={Server} />
+            <SectionButton id="loginTrackers" label="Login Trackers" icon={BarChart3} />
             <SectionButton id="backup" label="Backup & Data" icon={Database} />
           </div>
         </div>
@@ -613,12 +710,9 @@ const Settings: React.FC<SettingsProps> = ({
                     Company Profile
                   </h3>
                   <div className="flex items-start gap-6 mb-6">
-                    <div
+                    <label
                       className="w-24 h-24 bg-slate-100 rounded-2xl border-2 border-dashed border-slate-300 flex items-center justify-center overflow-hidden relative group cursor-pointer"
-                      onClick={() => fileInputRef.current?.click()}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => e.key === 'Enter' && fileInputRef.current?.click()}
+                      htmlFor="company-logo-upload"
                     >
                       {general.logo ? (
                         <img src={general.logo} alt="Company Logo" className="w-full h-full object-cover" />
@@ -629,13 +723,15 @@ const Settings: React.FC<SettingsProps> = ({
                         <span className="text-white text-xs font-bold">Change</span>
                       </div>
                       <input
+                        id="company-logo-upload"
                         type="file"
                         ref={fileInputRef}
                         className="hidden"
                         accept="image/*"
                         onChange={handleLogoUpload}
+                        aria-label="Upload company logo"
                       />
-                    </div>
+                    </label>
                     <div className="flex-1">
                       <p className="font-bold text-slate-700">Company Logo</p>
                       <p className="text-sm text-slate-500 mb-2">
@@ -653,10 +749,11 @@ const Settings: React.FC<SettingsProps> = ({
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <label htmlFor="company-name" className="block text-sm font-medium text-slate-700 mb-2">
                         Company Name
                       </label>
                       <input
+                        id="company-name"
                         type="text"
                         value={general.companyName}
                         onChange={(e) => setGeneral({ ...general, companyName: e.target.value })}
@@ -664,10 +761,11 @@ const Settings: React.FC<SettingsProps> = ({
                       />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <label htmlFor="company-address" className="block text-sm font-medium text-slate-700 mb-2">
                         Address
                       </label>
                       <input
+                        id="company-address"
                         type="text"
                         value={general.address}
                         onChange={(e) => setGeneral({ ...general, address: e.target.value })}
@@ -675,10 +773,11 @@ const Settings: React.FC<SettingsProps> = ({
                       />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <label htmlFor="company-email" className="block text-sm font-medium text-slate-700 mb-2">
                         Email
                       </label>
                       <input
+                        id="company-email"
                         type="email"
                         value={general.email}
                         onChange={(e) => setGeneral({ ...general, email: e.target.value })}
@@ -686,10 +785,11 @@ const Settings: React.FC<SettingsProps> = ({
                       />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <label htmlFor="company-phone" className="block text-sm font-medium text-slate-700 mb-2">
                         Phone
                       </label>
                       <input
+                        id="company-phone"
                         type="tel"
                         value={general.phone}
                         onChange={(e) => setGeneral({ ...general, phone: e.target.value })}
@@ -716,23 +816,13 @@ const Settings: React.FC<SettingsProps> = ({
                         placeholder="123-456-789"
                       />
                     </div>
+                    {/* VRN field removed: VAT disabled system-wide */}
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
-                        VAT Reg Number (VRN)
-                      </label>
-                      <input
-                        type="text"
-                        value={general.vrnNumber}
-                        onChange={(e) => setGeneral({ ...general, vrnNumber: e.target.value })}
-                        className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none font-mono transition-all"
-                        placeholder="400-999-111"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <label htmlFor="system-currency" className="block text-sm font-medium text-slate-700 mb-2">
                         System Currency
                       </label>
                       <select
+                        id="system-currency"
                         value={general.currency}
                         onChange={(e) => setGeneral({ ...general, currency: e.target.value })}
                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none transition-all"
@@ -742,10 +832,11 @@ const Settings: React.FC<SettingsProps> = ({
                       </select>
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <label htmlFor="system-language" className="block text-sm font-medium text-slate-700 mb-2">
                         Language
                       </label>
                       <select
+                        id="system-language"
                         value={general.language}
                         onChange={(e) => setGeneral({ ...general, language: e.target.value })}
                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none transition-all"
@@ -788,10 +879,11 @@ const Settings: React.FC<SettingsProps> = ({
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <label htmlFor="session-timeout" className="block text-sm font-medium text-slate-700 mb-2">
                         Session Timeout
                       </label>
                       <select
+                        id="session-timeout"
                         value={security.sessionTimeout}
                         onChange={(e) => setSecurity({ ...security, sessionTimeout: e.target.value })}
                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none transition-all"
@@ -802,10 +894,11 @@ const Settings: React.FC<SettingsProps> = ({
                       </select>
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <label htmlFor="password-expiry" className="block text-sm font-medium text-slate-700 mb-2">
                         Password Expiry
                       </label>
                       <select
+                        id="password-expiry"
                         value={security.passwordExpiry}
                         onChange={(e) => setSecurity({ ...security, passwordExpiry: e.target.value })}
                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none transition-all"
@@ -876,12 +969,29 @@ const Settings: React.FC<SettingsProps> = ({
                   </h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50 p-6 rounded-xl border border-slate-200">
                     <div>
-                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
+                      <label htmlFor="current-admin-password" className="block text-xs font-bold text-slate-500 uppercase mb-1">
+                        Current Password
+                      </label>
+                      <div className="relative">
+                        <Lock className="absolute left-3 top-3 text-slate-400" size={16} />
+                        <input
+                          id="current-admin-password"
+                          type="password"
+                          className="w-full pl-9 p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none transition-all"
+                          placeholder="Enter current password"
+                          value={security.currentAdminPassword}
+                          onChange={(e) => setSecurity({ ...security, currentAdminPassword: e.target.value })}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label htmlFor="new-admin-password" className="block text-xs font-bold text-slate-500 uppercase mb-1">
                         New Password
                       </label>
                       <div className="relative">
                         <Key className="absolute left-3 top-3 text-slate-400" size={16} />
                         <input
+                          id="new-admin-password"
                           type="password"
                           className="w-full pl-9 p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none transition-all"
                           placeholder="••••••••"
@@ -891,12 +1001,13 @@ const Settings: React.FC<SettingsProps> = ({
                       </div>
                     </div>
                     <div>
-                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
+                      <label htmlFor="confirm-admin-password" className="block text-xs font-bold text-slate-500 uppercase mb-1">
                         Confirm Password
                       </label>
                       <div className="relative">
                         <Key className="absolute left-3 top-3 text-slate-400" size={16} />
                         <input
+                          id="confirm-admin-password"
                           type="password"
                           className="w-full pl-9 p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none transition-all"
                           placeholder="••••••••"
@@ -959,12 +1070,13 @@ const Settings: React.FC<SettingsProps> = ({
                 </div>
 
                 <div className="mt-6">
-                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                  <label htmlFor="alert-recipient-emails" className="block text-sm font-medium text-slate-700 mb-2">
                     Alert Recipient Emails
                   </label>
                   <div className="relative">
                     <Mail className="absolute left-3 top-3 text-slate-400" size={20} />
                     <input
+                      id="alert-recipient-emails"
                       type="text"
                       value={notifications.emailRecipients}
                       onChange={(e) => setNotifications({ ...notifications, emailRecipients: e.target.value })}
@@ -1015,10 +1127,11 @@ const Settings: React.FC<SettingsProps> = ({
                   </div>
                   <div className="space-y-4">
                     <div>
-                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
+                      <label htmlFor="tra-api-endpoint" className="block text-xs font-bold text-slate-500 uppercase mb-1">
                         API Endpoint
                       </label>
                       <input
+                        id="tra-api-endpoint"
                         type="text"
                         value={integrations.traPortalUrl}
                         readOnly
@@ -1031,12 +1144,13 @@ const Settings: React.FC<SettingsProps> = ({
                 {/* API Key Management */}
                 <div className="border border-slate-200 rounded-xl p-6">
                   <h4 className="font-bold text-slate-800 mb-4">API Key Management</h4>
-                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
+                  <label htmlFor="api-secret-key" className="block text-xs font-bold text-slate-500 uppercase mb-1">
                     Secret Key
                   </label>
                   <div className="flex gap-2">
                     <div className="relative flex-1">
                       <input
+                        id="api-secret-key"
                         type={integrations.apiKeyVisible ? 'text' : 'password'}
                         value={integrations.apiKey}
                         readOnly
@@ -1051,6 +1165,7 @@ const Settings: React.FC<SettingsProps> = ({
                         }
                         className="absolute right-3 top-3 text-slate-400 hover:text-teal-600 transition-colors"
                         type="button"
+                        aria-label={integrations.apiKeyVisible ? 'Hide API key' : 'Show API key'}
                       >
                         {integrations.apiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
                       </button>
@@ -1066,15 +1181,16 @@ const Settings: React.FC<SettingsProps> = ({
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-2">
-                      NHIF Portal ID
-                    </label>
-                    <input
-                      type="text"
-                      value={integrations.nhifPortalId}
-                      onChange={(e) => setIntegrations({ ...integrations, nhifPortalId: e.target.value })}
-                      className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none transition-all"
-                    />
+                      <label htmlFor="nhif-portal-id" className="block text-sm font-medium text-slate-700 mb-2">
+                        NHIF Portal ID
+                      </label>
+                      <input
+                        id="nhif-portal-id"
+                        type="text"
+                        value={integrations.nhifPortalId}
+                        onChange={(e) => setIntegrations({ ...integrations, nhifPortalId: e.target.value })}
+                        className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none transition-all"
+                      />
                   </div>
                   <div>
                     <div className="flex justify-between items-center mb-2">
@@ -1090,11 +1206,13 @@ const Settings: React.FC<SettingsProps> = ({
                     </div>
                     <div className="flex gap-2">
                       <select
+                        id="sms-gateway"
                         value={integrations.smsGateway}
                         onChange={(e) =>
                           setIntegrations({ ...integrations, smsGateway: e.target.value })
                         }
                         className="flex-1 p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none transition-all"
+                        aria-label="SMS Gateway provider"
                       >
                         <option value="Twilio">Twilio</option>
                         <option value="Infobip">Infobip</option>
@@ -1120,6 +1238,101 @@ const Settings: React.FC<SettingsProps> = ({
                 <h3 className="text-xl font-bold text-slate-800 border-b border-slate-100 pb-4 mb-6">
                   Data Management
                 </h3>
+
+                {/* Auto-Backup Configuration */}
+                <div className="bg-emerald-50 p-6 rounded-xl border border-emerald-200">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <Cloud className="text-emerald-600" size={24} />
+                      <h4 className="font-bold text-emerald-900">Automatic Daily Backup</h4>
+                    </div>
+                    <Toggle
+                      checked={autoBackupEnabled}
+                      onChange={(v) => setAutoBackupEnabled(v)}
+                    />
+                  </div>
+                  
+                  {autoBackupEnabled && (
+                    <div className="space-y-4 mt-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label htmlFor="backup-time" className="block text-sm font-medium text-emerald-900 mb-2">
+                            Backup Time (Daily)
+                          </label>
+                          <input
+                            id="backup-time"
+                            type="time"
+                            value={autoBackupTime}
+                            onChange={(e) => setAutoBackupTime(e.target.value)}
+                            className="w-full p-2 border border-emerald-200 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none transition-all bg-white"
+                          />
+                          <p className="text-xs text-emerald-700 mt-1">
+                            Backup will run automatically at this time every day
+                          </p>
+                        </div>
+                        <div>
+                          <label htmlFor="retention-days" className="block text-sm font-medium text-emerald-900 mb-2">
+                            Retention Period
+                          </label>
+                          <select
+                            id="retention-days"
+                            value={backupRetentionDays}
+                            onChange={(e) => setBackupRetentionDays(parseInt(e.target.value))}
+                            className="w-full p-2 border border-emerald-200 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none transition-all bg-white"
+                          >
+                            <option value={7}>7 Days</option>
+                            <option value={14}>14 Days</option>
+                            <option value={30}>30 Days (Recommended)</option>
+                            <option value={60}>60 Days</option>
+                            <option value={90}>90 Days</option>
+                          </select>
+                          <p className="text-xs text-emerald-700 mt-1">
+                            Older backups will be automatically deleted
+                          </p>
+                        </div>
+                      </div>
+                      
+                      <button
+                        onClick={handleSaveBackupSettings}
+                        disabled={isSavingBackupSettings}
+                        className="w-full py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 font-bold transition-all disabled:opacity-70 flex items-center justify-center gap-2"
+                        type="button"
+                      >
+                        {isSavingBackupSettings ? (
+                          <>
+                            <RefreshCw className="animate-spin" size={16} />
+                            Saving...
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle size={16} />
+                            Save Auto-Backup Settings
+                          </>
+                        )}
+                      </button>
+
+                      {backupStatus && (
+                        <div className="bg-white rounded-lg p-3 border border-emerald-100">
+                          <p className="text-xs text-slate-700">
+                            <span className="font-bold">Last Backup:</span> {backupStatus.lastBackupTime ? new Date(backupStatus.lastBackupTime).toLocaleString() : 'Never'}
+                          </p>
+                          <p className="text-xs text-slate-700 mt-1">
+                            <span className="font-bold">Total Backups:</span> {backupStatus.backupCount}
+                          </p>
+                          <p className="text-xs text-slate-700 mt-1">
+                            <span className="font-bold">Backup Storage:</span> {(backupStatus.totalSize / 1024 / 1024).toFixed(2)} MB
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {!autoBackupEnabled && (
+                    <p className="text-sm text-emerald-700 mt-2">
+                      ⚠️ Automatic backup is disabled. Enable it to protect your data with daily automatic backups.
+                    </p>
+                  )}
+                </div>
 
                 <div className="bg-blue-50 p-6 rounded-xl border border-blue-100 flex items-start gap-4">
                   <Cloud className="text-blue-600 mt-1 shrink-0" size={24} />
@@ -1166,11 +1379,13 @@ const Settings: React.FC<SettingsProps> = ({
                       <Upload size={18} /> Upload File
                     </button>
                     <input
+                      id="restore-backup-file"
                       type="file"
                       ref={restoreInputRef}
                       className="hidden"
                       accept=".json"
                       onChange={handleRestoreBackup}
+                      aria-label="Select backup file to restore"
                     />
                   </div>
                 </div>
@@ -1193,6 +1408,134 @@ const Settings: React.FC<SettingsProps> = ({
               </div>
             )}
 
+            {activeSection === 'loginTrackers' && (
+              <div className="space-y-8 animate-in fade-in slide-in-from-right-4 duration-300">
+                <div>
+                  <h3 className="text-xl font-bold text-slate-800 border-b border-slate-100 pb-4 mb-6">
+                    User Login Activity
+                  </h3>
+                  <p className="text-slate-600 text-sm mb-6">
+                    Track and monitor user login activities across all branches for security auditing.
+                  </p>
+
+                  {/* Filters */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        Status Filter
+                      </label>
+                      <select
+                        value={trackerFilter}
+                        onChange={(e) => setTrackerFilter(e.target.value as any)}
+                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      >
+                        <option value="all">All Sessions</option>
+                        <option value="active">Active Sessions</option>
+                        <option value="inactive">Inactive Sessions</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        Time Period
+                      </label>
+                      <select
+                        value={trackerDaysFilter}
+                        onChange={(e) => setTrackerDaysFilter(parseInt(e.target.value))}
+                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      >
+                        <option value={7}>Last 7 Days</option>
+                        <option value={14}>Last 14 Days</option>
+                        <option value={30}>Last 30 Days</option>
+                        <option value={90}>Last 90 Days</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        Total Sessions
+                      </label>
+                      <div className="px-4 py-2 bg-teal-50 rounded-lg border border-teal-200 text-teal-700 font-bold">
+                        {loginTrackers.length}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Login Trackers Table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b-2 border-slate-200 bg-slate-50">
+                          <th className="py-3 px-4 text-left font-bold text-slate-700">User</th>
+                          <th className="py-3 px-4 text-left font-bold text-slate-700">Branch</th>
+                          <th className="py-3 px-4 text-left font-bold text-slate-700">Device</th>
+                          <th className="py-3 px-4 text-left font-bold text-slate-700">IP Address</th>
+                          <th className="py-3 px-4 text-left font-bold text-slate-700">Login Time</th>
+                          <th className="py-3 px-4 text-left font-bold text-slate-700">Duration</th>
+                          <th className="py-3 px-4 text-left font-bold text-slate-700">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {loginTrackers && loginTrackers.length > 0 ? (
+                          loginTrackers
+                            .filter((tracker) => {
+                              if (trackerFilter === 'active') return tracker.status === 'active';
+                              if (trackerFilter === 'inactive') return tracker.status === 'inactive';
+                              return true;
+                            })
+                            .map((tracker) => (
+                              <tr key={tracker.id} className="border-b border-slate-200 hover:bg-slate-50 transition-colors">
+                                <td className="py-3 px-4">
+                                  <div className="font-medium text-slate-800">{tracker.userName}</div>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="text-slate-600">{tracker.branchName}</div>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="text-slate-600">{tracker.deviceInfo || 'Unknown'}</div>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <code className="text-xs bg-slate-100 px-2 py-1 rounded text-slate-600">
+                                    {tracker.ipAddress || 'N/A'}
+                                  </code>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="text-slate-600">
+                                    {new Date(tracker.loginTime).toLocaleString()}
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="text-slate-600">
+                                    {tracker.sessionDurationMinutes 
+                                      ? `${Math.floor(tracker.sessionDurationMinutes / 60)}h ${tracker.sessionDurationMinutes % 60}m`
+                                      : 'N/A'}
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <span
+                                    className={`px-3 py-1 rounded-full text-xs font-bold ${
+                                      tracker.status === 'active'
+                                        ? 'bg-emerald-100 text-emerald-700'
+                                        : 'bg-slate-100 text-slate-700'
+                                    }`}
+                                  >
+                                    {tracker.status === 'active' ? '🟢 Active' : '⚫ Inactive'}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))
+                        ) : (
+                          <tr>
+                            <td colSpan={7} className="py-8 px-4 text-center text-slate-500">
+                              No login trackers available for the selected period.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
           </div>
         </div>
       </div>
@@ -1201,3 +1544,4 @@ const Settings: React.FC<SettingsProps> = ({
 };
 
 export default Settings;
+

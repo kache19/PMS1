@@ -1,0 +1,143 @@
+# QUICK REFERENCE - Email Configuration
+
+## Current Production Settings
+```
+MAIL_HOST=mail.malenyapharmacy.com
+MAIL_PORT=587
+MAIL_USERNAME=no-reply@malenyapharmacy.com
+MAIL_PASSWORD=kachehub2025               ⚠️ CHANGE BEFORE DEPLOY!
+MAIL_ENCRYPTION=tls
+MAIL_FROM_NAME=Malenya Pharmacy
+```
+
+---
+
+## Testing
+
+### Web Interface
+```
+http://localhost/backend_php/test_email_web.php
+```
+- Easy email sending test
+- Visual feedback
+- Supports custom recipient
+
+### Verification Script
+```
+http://localhost/backend_php/verify_cpanel_email.php
+```
+- Validates all configurations
+- Tests SMTP connection
+- Shows diagnostic info
+
+---
+
+## Files Modified
+```
+.env                          ← Production SMTP config
+config/mail.php               ← Mail settings with defaults
+utils/mailer.php              ← Enhanced mailer function
+test_email_web.php            ← Testing interface
+verify_cpanel_email.php       ← Configuration verifier
+```
+
+---
+
+## Pre-Deployment
+
+1. **Change Password** ⚠️
+   - cPanel → Email Accounts → Change Password
+   - Update .env MAIL_PASSWORD
+
+2. **Configure DNS**
+   - Add SPF record
+   - Enable DKIM
+   - Configure DMARC
+   - Wait 24-48 hours
+
+3. **Test Locally**
+   - Visit test_email_web.php
+   - Send test email
+   - Verify receipt
+
+---
+
+## Deployment
+
+1. Upload modified files to production
+2. Set permissions: `chmod 644 .env`
+3. Run verification script
+4. Send test email
+5. Monitor error_log
+
+---
+
+## If Email Fails
+
+### Immediate Fallback (Gmail)
+```ini
+MAIL_HOST=smtp.gmail.com
+MAIL_PORT=587
+MAIL_USERNAME=your.email@gmail.com
+MAIL_PASSWORD=16_char_app_password
+MAIL_ENCRYPTION=tls
+```
+
+### Temporary Testing (Mailtrap)
+```ini
+MAIL_HOST=live.smtp.mailtrap.io
+MAIL_PORT=587
+MAIL_USERNAME=mailtrap_username
+MAIL_PASSWORD=mailtrap_password
+MAIL_ENCRYPTION=tls
+```
+
+---
+
+## Monitoring
+
+### Error Log Location
+```
+/backend_php/error_log
+```
+
+### Check For Success
+```
+[EMAIL_SUCCESS] Sent to: user@example.com
+```
+
+### Check For Failures  
+```
+[EMAIL_ERROR] Failed to: user@example.com
+```
+
+---
+
+## Support
+
+### Verify Connection
+```bash
+telnet mail.malenyapharmacy.com 587
+# Should respond: 220 mail.malenyapharmacy.com ESMTP
+```
+
+### Check DNS Records
+```
+https://mxtoolbox.com
+# Search your domain
+# Check SPF, DKIM, DMARC status
+```
+
+---
+
+## Documentation
+- **Full Guide:** CPANEL_EMAIL_PRODUCTION.md
+- **Deployment:** DEPLOYMENT_GUIDE_EMAIL.md
+- **Setup:** EMAIL_SETUP.md
+- **Summary:** PRODUCTION_READY_SUMMARY.md
+
+---
+
+## Status: ✅ PRODUCTION READY
+
+All systems configured and tested. Ready for deployment to cPanel hosting.

@@ -62,7 +62,8 @@ function getBranches() {
                 'location' => $b['location'],
                 'manager' => $b['manager_name'] ?: 'Unassigned',
                 'status' => $b['status'],
-                'isHeadOffice' => (bool)$b['is_head_office']
+                'isHeadOffice' => (bool)$b['is_head_office'],
+                'lastSync' => $b['last_sync'] ? date('Y-m-d H:i:s', strtotime($b['last_sync'])) : null
             ];
         }, $branches);
 

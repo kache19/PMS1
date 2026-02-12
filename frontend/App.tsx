@@ -13,6 +13,7 @@ import Reports from './components/Reports';
 import Settings from './components/Settings';
 import Approvals from './components/Approvals';
 import Archive from './components/Archive';
+import Entities from './components/Entities';
 import { NotificationProvider, NotificationContainer, useNotifications } from './components/NotificationContext';
 import { Staff as StaffType, UserRole, BranchInventoryItem, StockTransfer, Sale, Invoice, CartItem, PaymentMethod, StockReleaseRequest, StockRequisition, DisposalRequest, Expense, Branch, Product, SystemSetting } from './types';
 import { api } from './services/api';
@@ -384,8 +385,12 @@ const AppContent: React.FC = () => {
       }
   };
 
-  const handleAddStock = async (data: { branchId: string, productId: string, batchNumber: string, expiryDate: string, quantity: number }) => {
+  const handleAddStock = async (data: { branchId: string, productId: string, batchNumber: string, expiryDate: string, quantity: number, supplierId?: string, supplierName?: string, restockStatus?: string, lastRestockDate?: string }) => {
       const previousInventory = inventory;
+      
+      // Add restock info if not provided
+      const restockStatus = data.restockStatus || 'RECEIVED';
+      const lastRestockDate = data.lastRestockDate || new Date().toISOString();
       setInventory(prev => {
          const branchInventory = [...(prev[data.branchId] || [])];
          const existingItemIndex = branchInventory.findIndex(i => i.productId === data.productId);
@@ -394,24 +399,37 @@ const AppContent: React.FC = () => {
              batchNumber: data.batchNumber,
              expiryDate: data.expiryDate,
              quantity: data.quantity,
-             status: 'ACTIVE' as const
+             status: 'ACTIVE' as const,
+             supplierName: data.supplierName,
+             supplierId: data.supplierId
          };
 
          if (existingItemIndex >= 0) {
+             const prevQty = branchInventory[existingItemIndex].quantity;
              branchInventory[existingItemIndex].batches.push(newBatch);
              branchInventory[existingItemIndex].quantity += data.quantity;
+             // Mark as RESTOCKED if stock was low or zero before
+             if (prevQty <= 0) {
+                 branchInventory[existingItemIndex].restockStatus = 'RESTOCKED';
+                 branchInventory[existingItemIndex].lastRestockDate = new Date().toISOString();
+             }
          } else {
              branchInventory.push({
                  productId: data.productId,
                  quantity: data.quantity,
-                 batches: [newBatch]
+                 batches: [newBatch],
+                 restockStatus: 'RESTOCKED',
+                 lastRestockDate: new Date().toISOString()
              });
          }
          return { ...prev, [data.branchId]: branchInventory };
       });
 
       try {
-             await api.addStock(data);
+             await api.addStock({ ...data, restockStatus, lastRestockDate });
+             // Refetch inventory from server to ensure DB quantity is accurate
+             const updatedInventory = await api.getInventory(data.branchId);
+             setInventory(prev => ({ ...prev, ...updatedInventory }));
              showSuccess('Stock Added', `${data.quantity} units added to inventory.`);
        } catch (error) {
           console.error('Failed to add stock:', error);
@@ -422,8 +440,14 @@ const AppContent: React.FC = () => {
 
   const handleCreateInvoice = async (newInvoice: Invoice) => {
     try {
-      await api.createInvoice(newInvoice);
-      setInvoices(prev => [newInvoice, ...prev]);
+      const createdInvoice = await api.createInvoice(newInvoice);
+      // Return the created invoice (with ID from backend)
+      // Backend generates IDs in format INV-BR###-YYYY-0001, so this should always be present
+      const invoiceWithId = createdInvoice?.id 
+        ? createdInvoice 
+        : { ...newInvoice, id: newInvoice.id || `INV-BR000-${new Date().getFullYear()}-${Math.random().toString().substr(2, 4)}` };
+      setInvoices(prev => [invoiceWithId, ...prev]);
+      return invoiceWithId;
     } catch (error) {
       console.error('Failed to create invoice:', error);
       throw error;
@@ -789,9 +813,11 @@ const AppContent: React.FC = () => {
             />
         );
       case 'staff':
-        return <Staff currentBranchId={currentBranchId} branches={branches} staffList={staffList} onAddStaff={handleAddStaff} onUpdateStaff={handleUpdateStaff} />;
+        return <Staff currentBranchId={currentBranchId} branches={branches} staffList={staffList} currentUser={currentUser} onAddStaff={handleAddStaff} onUpdateStaff={handleUpdateStaff} />;
       case 'branches':
         return <Branches branches={branches} onUpdateBranches={setBranches} onAddBranch={handleAddBranch} staff={staffList} currentUser={currentUser} />;
+      case 'entities':
+        return <Entities mode="management" />;
       case 'clinical':
         return <Clinical currentBranchId={currentBranchId} />;
       case 'reports':

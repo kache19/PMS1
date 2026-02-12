@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Create Shipment - Malenya Sayuni Medics</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 600px; 
+            margin: 50px auto; 
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 { color: #0d9488; margin-bottom: 20px; }
+        .btn {
+            background: #0d9488;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+            transition: background 0.3s;
+        }
+        .btn:hover { background: #0f766e; }
+        .btn:disabled { background: #94a3b8; cursor: not-allowed; }
+        #result {
+            margin-top: 20px;
+            padding: 20px;
+            border-radius: 8px;
+            display: none;
+        }
+        .success { background: #dcfce7; border: 1px solid #22c55e; color: #166534; }
+        .error { background: #fee2e2; border: 1px solid #ef4444; color: #991b1b; }
+        .loading { background: #dbeafe; border: 1px solid #3b82f6; color: #1e40af; }
+        pre { 
+            background: #1e293b; 
+            color: #a5f3fc;
+            padding: 15px; 
+            border-radius: 8px; 
+            overflow-x: auto;
+            font-size: 13px;
+        }
+        .info {
+            background: #f0f9ff;
+            border: 1px solid #0ea5e9;
+            color: #0369a1;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>📦 Create Shipment</h1>
+        
+        <div class="info">
+            <strong>Customer:</strong> Malenya Sayuni Medics<br>
+            <strong>Products:</strong> 5 medical items<br>
+            <strong>Estimated Total:</strong> TZS 1,450,000
+        </div>
+
+        <button class="btn" id="createBtn" onclick="createShipment()">
+            Create Shipment & Invoice
+        </button>
+
+        <div id="result"></div>
+    </div>
+
+    <script>
+        async function createShipment() {
+            const btn = document.getElementById('createBtn');
+            const result = document.getElementById('result');
+            
+            btn.disabled = true;
+            btn.textContent = 'Creating Shipment...';
+            result.style.display = 'block';
+            result.className = 'loading';
+            result.innerHTML = '<p>⏳ Processing shipment for Malenya Sayuni Medics...</p>';
+            
+            try {
+                const response = await fetch('http://localhost/backend_php/api/shipments/customer-shipment.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        customerName: 'Malenya Sayuni Medics',
+                        branchId: 1,
+                        notes: 'Medical supplies shipment to Malenya Sayuni Medics'
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    result.className = 'success';
+                    result.innerHTML = `
+                        <h3>✅ Shipment Created Successfully!</h3>
+                        <p><strong>Customer:</strong> ${data.shipment.customerName}</p>
+                        <p><strong>Shipment ID:</strong> ${data.shipment.id}</p>
+                        <p><strong>Invoice ID:</strong> ${data.invoice.id}</p>
+                        <p><strong>Total Amount:</strong> TZS ${data.invoice.totalAmount.toLocaleString()}</p>
+                        <p><strong>Invoice Status:</strong> ${data.invoice.status}</p>
+                        <p><strong>Due Date:</strong> ${data.invoice.dueDate}</p>
+                        <p><strong>Items Shipped:</strong> ${data.shipment.itemsCount}</p>
+                        ${data.unavailableProducts && data.unavailableProducts.length > 0 
+                            ? `<p class="error">⚠️ Some products were unavailable</p>`
+                            : ''}
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                } else {
+                    result.className = 'error';
+                    result.innerHTML = `
+                        <h3>❌ Shipment Failed</h3>
+                        <p>${data.error || 'Unknown error occurred'}</p>
+                        ${data.unavailableProducts ? '<p>Some products were unavailable</p>' : ''}
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                }
+            } catch (error) {
+                result.className = 'error';
+                result.innerHTML = `
+                    <h3>❌ Request Failed</h3>
+                    <p>${error.message}</p>
+                    <p>Make sure the web server (Apache) is running and MySQL is accessible.</p>
+                `;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Create Shipment & Invoice';
+            }
+        }
+    </script>
+</body>
+</html>

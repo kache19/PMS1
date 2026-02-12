@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Plus,
   MapPin,
@@ -37,6 +37,8 @@ const Branches: React.FC<BranchesProps> = ({ branches, onUpdateBranches, onAddBr
   const [currentBranch, setCurrentBranch] = useState<Branch | null>(null);
   const [formData, setFormData] = useState<Partial<Branch>>({});
   const [branchToDelete, setBranchToDelete] = useState<Branch | null>(null);
+
+  const [lastSync, setLastSync] = useState(new Date());
 
   // Stats
   const mainBranch = branches.find(b => b.isHeadOffice);
@@ -284,7 +286,7 @@ const Branches: React.FC<BranchesProps> = ({ branches, onUpdateBranches, onAddBr
                       )}
                    </td>
                    <td className="px-6 py-4 text-xs text-slate-500">
-                     2 mins ago
+                     {branch.lastSync ? new Date(branch.lastSync).toLocaleString() : 'Never'}
                    </td>
                    <td className="px-6 py-4">
                       <div className="flex items-center gap-2">

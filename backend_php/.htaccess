@@ -1,0 +1,88 @@
+# Security & Rewrite Rules for Pharmacy System API
+
+# Disable directory listing
+Options -Indexes
+
+# Enable mod_rewrite
+RewriteEngine On
+
+# Redirect HTTP to HTTPS (uncomment in production)
+# RewriteCond %{HTTPS} off
+# RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# Remove public access to config files (security)
+RewriteRule ^config/ - [F,L]
+RewriteRule ^vendor/ - [F,L]
+RewriteRule ^migrations/ - [F,L]
+RewriteRule ^utils/ - [F,L]
+RewriteRule ^routes/ - [F,L]
+
+# Protect sensitive files
+<FilesMatch "\.(env|sql|log|bak|backup)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# ============================================================================
+# ENVIRONMENT VARIABLES FOR cPANEL EMAIL
+# ============================================================================
+# Update these with your cPanel email account credentials
+# Steps:
+#   1. Log into cPanel
+#   2. Find your email account credentials:
+#      - Go to Email Accounts → your_email@yourdomain.com
+#      - Mail server: mail.yourdomain.com (or your hosting provider's mail server)
+#      - Port: Usually 465 (SSL) or 587 (TLS)
+#      - Username & Password from cPanel
+#
+# Example for popular hosts:
+#   - Bluehost: mail.yourdomain.com:465 (SSL)
+#   - Hostinger: mail.yourdomain.com:465 (SSL)
+#   - SiteGround: Your domain's mail server:465
+#   - cPanel Generic: mail.yourdomain.com:465 or 587
+
+# Set MAIL_HOST to your email server
+SetEnv MAIL_HOST mail.malenyapharmacy.com
+
+# Set MAIL_PORT (usually 465 for SSL or 587 for TLS)
+SetEnv MAIL_PORT 465
+
+# Set MAIL_USERNAME to your full email address
+SetEnv MAIL_USERNAME no-reply@malenyapharmacy.com
+
+# Set MAIL_PASSWORD to your cPanel email password
+SetEnv MAIL_PASSWORD kachehub2025
+
+# MAIL_ENCRYPTION: Use 'ssl' for port 465 or 'tls' for port 587
+SetEnv MAIL_ENCRYPTION ssl
+
+# From address for sent emails (can be same as MAIL_USERNAME)
+SetEnv MAIL_FROM_ADDRESS no-reply@malenyapharmacy.com
+
+# Display name for sent emails
+SetEnv MAIL_FROM_NAME "Malenya Pharmacy"
+
+# Frontend URL for password reset links
+# Update to your actual frontend domain
+SetEnv RESET_BASE_URL https://malenyapharmacy.com/auth/reset-password?token=
+
+# ============================================================================
+# DATABASE CONFIGURATION (Optional - if not in config/database.php)
+# ============================================================================
+# Uncomment and update if needed:
+# SetEnv DB_HOST localhost
+# SetEnv DB_NAME malenyap_pms_db
+# SetEnv DB_USER db_user
+# SetEnv DB_PASSWORD db_password
+
+# ============================================================================
+# API Routing - Direct all requests to index.php
+# ============================================================================
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ index.php?_url=$1 [QSA,L]
+
+# Allow direct access to assets
+<FilesMatch "\.(jpg|jpeg|png|gif|css|js|ico|svg|woff|woff2|ttf|eot)$">
+    RewriteEngine Off
+</FilesMatch>

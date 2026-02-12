@@ -6,7 +6,7 @@ import {
   Minus,
   CreditCard,
   Banknote,
-  ShieldCheck,
+  // ShieldCheck removed
   Printer,
   CheckCircle,
   AlertOctagon,
@@ -19,12 +19,21 @@ import {
   ArrowRight,
   ShoppingCart,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  FilePlus,
+  Users
 } from 'lucide-react';
-import { Product, CartItem, PaymentMethod, BranchInventoryItem, Invoice, Branch } from '../types';
-import { checkDrugInteractions } from '../services/geminiService';
+import { Product, CartItem, PaymentMethod, BranchInventoryItem, Invoice, Branch, Entity } from '../types';
+// Drug interaction checks removed per request
 import { api } from '../services/api';
 import { useNotifications } from './NotificationContext';
+import { openCustomPrint } from '../services/printUtils';
+import { renderToStaticMarkup } from 'react-dom/server';
+import InvoicePreviewModal from './InvoicePreviewModal';
+import InvoiceModal from './InvoiceModal';
+import PaymentModal from './PaymentModal';
+import ModernInvoicePrintTemplate from './ModernInvoicePrintTemplate';
+import Entities from './Entities';
 
 interface POSProps {
   currentBranchId: string;
@@ -39,17 +48,40 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
   const [searchTerm, setSearchTerm] = useState('');
   const [quickQty, setQuickQty] = useState<number>(1);
   const [customerModalOpen, setCustomerModalOpen] = useState(false);
-  const [previewMode, setPreviewMode] = useState(false);
-  const [customerName, setCustomerName] = useState('');
-  const [interactionWarning, setInteractionWarning] = useState<string | null>(null);
+   const [previewMode, setPreviewMode] = useState(false);
+   const [customerName, setCustomerName] = useState('');
+   const [customerPhone, setCustomerPhone] = useState('');
+   const [selectedCustomer, setSelectedCustomer] = useState<Entity | null>(null);
+   const [showCustomerSelector, setShowCustomerSelector] = useState(false);
+   const [savedCustomers, setSavedCustomers] = useState<Entity[]>([]);
+   // interaction warnings removed
   const [successMsg, setSuccessMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isProductPanelCollapsed, setIsProductPanelCollapsed] = useState(false);
   const [companyLogo, setCompanyLogo] = useState('');
+  const [localInventory, setLocalInventory] = useState<Record<string, BranchInventoryItem[]>>(inventory);
+  
+  // Preview Modal State (same as Finance)
+  const [showPreviewModal, setShowPreviewModal] = useState(false);
+  const [previewInvoice, setPreviewInvoice] = useState<Invoice | null>(null);
+  const [showInvoiceModal, setShowInvoiceModal] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
+  
+  // Company settings state
+  const [companySettings, setCompanySettings] = useState({
+    companyName: 'PMS Pharmacy',
+    tinNumber: '123-456-789',
+    vrnNumber: '400-999-111',
+    address: 'Bagamoyo Road, Dar es Salaam, Tanzania',
+    phone: '+255 700 123 456',
+    email: 'info@pms-pharmacy.tz',
+    logo: '/backend_php/uploads/logos/logo.png'
+  });
 
-  // Load branches and logo on mount
+  // Load branches, logo and company settings on mount
   useEffect(() => {
     const loadData = async () => {
       try {
@@ -58,8 +90,25 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
           api.getSettings()
         ]);
         setBranches(branchesData || []);
+        
         const logoSetting = settingsData.find(s => s.settingKey === 'logo');
         setCompanyLogo(logoSetting?.settingValue || '/backend_php/uploads/logos/logo.png');
+        
+        // Load saved customers
+        await loadSavedCustomers();
+        
+        // Load company settings for invoice template
+        if (settingsData && settingsData.length > 0) {
+          setCompanySettings({
+            companyName: settingsData.find((s: any) => s.settingKey === 'companyName')?.settingValue || 'PMS Pharmacy',
+            tinNumber: settingsData.find((s: any) => s.settingKey === 'tinNumber')?.settingValue || '123-456-789',
+            vrnNumber: settingsData.find((s: any) => s.settingKey === 'vrnNumber')?.settingValue || '400-999-111',
+            address: settingsData.find((s: any) => s.settingKey === 'address')?.settingValue || 'Bagamoyo Road, Dar es Salaam, Tanzania',
+            phone: settingsData.find((s: any) => s.settingKey === 'phone')?.settingValue || '+255 700 123 456',
+            email: settingsData.find((s: any) => s.settingKey === 'email')?.settingValue || 'info@pms-pharmacy.tz',
+            logo: logoSetting?.settingValue || '/backend_php/uploads/logos/logo.png'
+          });
+        }
       } catch (error) {
         console.error('Failed to load data:', error);
       } finally {
@@ -69,8 +118,26 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
     loadData();
   }, []);
 
+  // Load saved customers
+  const loadSavedCustomers = async () => {
+    try {
+      const token = sessionStorage.getItem('authToken');
+      console.log('[POS] Loading customers, token exists:', !!token);
+      
+      // Use the API service to get customers
+      const customers = await api.getEntities({ type: 'CUSTOMER', status: 'ACTIVE' });
+      console.log('[POS] Customers loaded:', customers);
+      setSavedCustomers(customers || []);
+    } catch (error) {
+      console.error('[POS] Failed to load customers:', error);
+      // Don't show error toast for this - it's not critical
+      setSavedCustomers([]);
+    }
+  };
+
   const currentBranch = branches.find(b => b.id === currentBranchId);
   const isHeadOffice = currentBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';
+  const isMainBranch = currentBranchId === 'BR003' || isHeadOffice; // Allow main branch (BR003) to have POS access
   const branchName = currentBranch?.name || 'Unknown Branch';
 
   // Merge Products with Branch Specific Inventory
@@ -79,51 +146,34 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
     const inventoryItem = branchStockList.find(i => i.productId === p.id);
     const customPrice = inventoryItem?.customPrice;
 
-    const activeStock = inventoryItem
-      ? inventoryItem.batches.filter(b => b.status === 'ACTIVE').reduce((sum, b) => sum + b.quantity, 0)
-      : 0;
+    const baseStock = inventoryItem ? inventoryItem.quantity : 0;
+    const pendingIncoming = inventoryItem?.pendingIncoming || 0;
+    const totalStock = baseStock + pendingIncoming;
 
     return {
       ...p,
       price: customPrice || p.price,
-      totalStock: activeStock
-    };
+      totalStock: totalStock,
+      baseStock: baseStock,
+      pendingIncoming: pendingIncoming
+    } as any;
   });
 
   // Calculate totals
   const subtotal = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-  const vat = subtotal * 0.18;
-  const total = subtotal + vat;
+  const vat = 0; // VAT removed system-wide
+  const total = subtotal;
 
-  // Drug interaction check
-  useEffect(() => {
-    const timer = setTimeout(async () => {
-      if (cart.length > 1) {
-        try {
-          const warning = await checkDrugInteractions(cart);
-          if (warning && warning.toLowerCase() !== "safe") {
-            setInteractionWarning(warning);
-          } else {
-            setInteractionWarning(null);
-          }
-        } catch (error) {
-          console.error('Drug interaction check failed:', error);
-        }
-      } else {
-        setInteractionWarning(null);
-      }
-    }, 1000);
-    return () => clearTimeout(timer);
-  }, [cart]);
 
   const addToCart = (product: Product) => {
     const qtyToAdd = quickQty > 0 ? quickQty : 1;
     const currentQtyInCart = cart.find(i => i.id === product.id)?.quantity || 0;
 
-    if (currentQtyInCart + qtyToAdd > product.totalStock) {
+    // Enforce availability based on baseStock
+    if (currentQtyInCart + qtyToAdd > (product as any).baseStock) {
       showError(
         'Insufficient Stock',
-        `Available: ${product.totalStock}, Requested: ${currentQtyInCart + qtyToAdd}`
+        `Available: ${(product as any).baseStock}, Requested: ${currentQtyInCart + qtyToAdd}`
       );
       return;
     }
@@ -155,10 +205,12 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
       const product = availableProducts.find(p => p.id === id);
       if (!product) return prev;
 
-      if (newQty > product.totalStock) {
+      // Enforce against baseStock
+      const base = (product as any).baseStock || 0;
+      if (newQty > base) {
         showError(
           'Insufficient Stock',
-          `Limit is ${product.totalStock} units for ${product.name}`
+          `Limit is ${base} units for ${product.name}`
         );
         return prev;
       }
@@ -169,63 +221,154 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
     });
   };
 
-  const handleGenerateProforma = async () => {
+  // Keep the original handleCreateInvoice for backwards compatibility
+  const handleCreateInvoice = async () => {
+    await handleCreateInvoiceFromPOS();
+  };
+
+  // Modern invoice print using same template as Finance
+  const handlePrintProforma = () => {
+    // Transform cart data to match ModernInvoicePrintTemplate interface
+    const invoiceData = {
+      id: `POS-${Date.now().toString().slice(-6)}`,
+      dateIssued: new Date().toISOString().split('T')[0],
+      client: {
+        name: customerName,
+        address: '-',
+        email: '-',
+        phone: customerPhone || '-'
+      },
+      items: cart.map((item, idx) => ({
+        description: item.name,
+        quantity: item.quantity,
+        price: item.price,
+        total: item.price * item.quantity
+      })),
+      subtotal: total,
+      tax: 0,
+      total: total,
+      paymentTerms: 'Payment due upon receipt.',
+      paymentMethod: 'Cash'
+    };
+
+    const companyData = {
+      companyName: companySettings.companyName,
+      tinNumber: companySettings.tinNumber,
+      address: companySettings.address,
+      phone: companySettings.phone,
+      email: companySettings.email,
+      logo: companySettings.logo
+    };
+
+    // Generate HTML using the same template as Finance with PROFORMA INVOICE title
+    const html = renderToStaticMarkup(
+      <ModernInvoicePrintTemplate title="PROFORMA INVOICE" invoice={invoiceData} companySettings={companyData} />
+    );
+
+    openCustomPrint(html, 'Proforma Invoice Print');
+  };
+
+  // Preview invoice using the same modal as Finance
+  const handlePreviewInvoice = async () => {
     if (!customerName.trim()) {
       showError('Validation Error', 'Please enter a customer name.');
       return;
     }
 
-    const invoice: Invoice = {
-      id: `INV-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    // Create a temporary invoice for preview
+    const tempInvoice: Invoice = {
+      id: `PREVIEW-${Date.now().toString().slice(-6)}`,
       branchId: currentBranchId,
       customerName: customerName,
+      customerPhone: customerPhone || undefined,
       dateIssued: new Date().toISOString().split('T')[0],
-      dueDate: new Date().toISOString().split('T')[0],
+      dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       totalAmount: total,
       paidAmount: 0,
       status: 'UNPAID',
-      description: `POS Sale - ${cart.length} items`,
+      description: 'Invoice from POS',
       source: 'POS',
-      items: cart,
+      items: cart.map(item => ({
+        id: item.id,
+        name: item.name,
+        quantity: item.quantity,
+        price: item.price,
+        costPrice: item.costPrice || 0,
+        selectedBatch: item.selectedBatch || 'AUTO'
+      })),
+      payments: []
+    };
+
+    setPreviewInvoice(tempInvoice);
+    setShowPreviewModal(true);
+  };
+
+  // Handle create invoice from POS (creates actual invoice)
+  const handleCreateInvoiceFromPOS = async () => {
+    if (!customerName.trim()) {
+      showError('Validation Error', 'Please enter a customer name.');
+      return;
+    }
+
+    const invoiceData: Partial<Invoice> = {
+      // Backend will generate ID in format INV-BR###-YYYY-0001 if not provided
+      branchId: currentBranchId,
+      customerName: customerName,
+      customerPhone: customerPhone || undefined,
+      items: cart.map(item => ({
+        id: item.id,
+        name: item.name,
+        quantity: item.quantity,
+        price: item.price,
+        costPrice: item.costPrice || 0,
+        selectedBatch: item.selectedBatch || 'AUTO'
+      })),
+      totalAmount: total,
+      paidAmount: 0,
+      status: 'UNPAID',
+      description: 'Invoice from POS',
+      source: 'POS',
+      dateIssued: new Date().toISOString().split('T')[0],
+      dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       payments: []
     };
 
     try {
-      await onCreateInvoice(invoice);
+      const createdInvoice = await onCreateInvoice(invoiceData as Invoice);
+      
       setCustomerModalOpen(false);
       setPreviewMode(false);
       showSuccess(
         'Invoice Created',
-        `Proforma Invoice #${invoice.id} sent to Finance`
+        `Invoice #${createdInvoice?.id || invoiceData.id} sent to Finance for payment.`
       );
       setCart([]);
       setCustomerName('');
+      setCustomerPhone('');
     } catch (error) {
-      console.error('Failed to create invoice:', error);
-      showError('Creation Failed', 'Failed to create invoice. Please try again.');
+      console.error('POS: Failed to create invoice:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to create invoice. Please try again.';
+      showError('Invoice Creation Failed', errorMessage);
     }
   };
 
-  const handlePrintProforma = () => {
-    window.print();
-  };
-
+  // Only show products with stock available for sale
   const filteredProducts = availableProducts.filter(p =>
-    (p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.genericName.toLowerCase().includes(searchTerm.toLowerCase())) &&
-    p.totalStock > 0
+    ((p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      p.genericName.toLowerCase().includes(searchTerm.toLowerCase())) && (p.baseStock || 0) > 0)
   );
 
 
-  if (isHeadOffice) {
+  // Allow POS in all valid branch contexts
+  if (false) {
     return (
       <div className="flex flex-col items-center justify-center h-[60vh] text-center p-8 bg-white rounded-2xl shadow-sm border border-slate-100">
         <div className="p-6 bg-amber-50 rounded-full mb-4">
           <AlertOctagon size={48} className="text-amber-500" />
         </div>
-        <h2 className="text-2xl font-bold text-slate-800 mb-2">POS Unavailable in Head Office View</h2>
+        <h2 className="text-2xl font-bold text-slate-800 mb-2">POS Unavailable</h2>
         <p className="text-slate-500 max-w-md mb-6">
-          Point of Sale operations must be conducted within a specific branch context. Please switch to a branch using the selector in the sidebar.
+          Point of Sale operations require a valid branch context. Please switch to a branch using the selector in the sidebar.
         </p>
       </div>
     );
@@ -273,6 +416,7 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
                       className="w-full pl-10 pr-3 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 font-bold text-center"
                       value={quickQty}
                       onChange={(e) => setQuickQty(parseInt(e.target.value) || 0)}
+                      aria-label="Quick add quantity"
                     />
                   </div>
                 </div>
@@ -300,26 +444,45 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
                     <button
                       key={product.id}
                       onClick={() => addToCart(product)}
-                      className="flex flex-col text-left p-4 rounded-xl border border-slate-200 hover:border-teal-500 hover:bg-teal-50 transition-all group"
+                      disabled={product.totalStock === 0}
+                      className={`flex flex-col text-left p-4 rounded-xl border transition-all group ${
+                        product.totalStock === 0
+                          ? 'border-slate-200 bg-slate-50 opacity-60 cursor-not-allowed'
+                          : 'border-slate-200 hover:border-teal-500 hover:bg-teal-50'
+                      }`}
                     >
                       <div className="flex justify-between w-full mb-2">
                         <span className="text-xs font-bold text-teal-600 bg-teal-100 px-2 py-1 rounded-md">
                           {product.unit}
                         </span>
-                        {product.requiresPrescription && (
-                          <span className="text-xs font-bold text-red-600 bg-red-100 px-2 py-1 rounded-md">Rx</span>
-                        )}
+                        <div className="flex gap-1">
+                          {product.totalStock === 0 && (
+                            <span className="text-xs font-bold text-red-600 bg-red-100 px-2 py-1 rounded-md">Out</span>
+                          )}
+                          {product.requiresPrescription && (
+                            <span className="text-xs font-bold text-red-600 bg-red-100 px-2 py-1 rounded-md">Rx</span>
+                          )}
+                        </div>
                       </div>
-                      <h3 className="font-bold text-slate-800 mb-1 group-hover:text-teal-700 text-sm line-clamp-2">
+                      <h3 className={`font-bold mb-1 group-hover:text-teal-700 text-sm line-clamp-2 ${
+                        product.totalStock === 0 ? 'text-slate-600' : 'text-slate-800'
+                      }`}>
                         {product.name}
                       </h3>
                       <p className="text-xs text-slate-500 mb-3 line-clamp-1">{product.genericName}</p>
                       <div className="mt-auto pt-2 border-t border-slate-100 w-full flex justify-between items-center">
                         <div className="flex flex-col">
-                          <span className="font-bold text-slate-900 text-sm">
+                          <span className={`font-bold text-sm ${
+                            product.totalStock === 0 ? 'text-slate-500' : 'text-slate-900'
+                          }`}>
                             {(product.price || 0).toLocaleString()} TZS
                           </span>
-                          <span className="text-[10px] text-slate-400">Stock: {product.totalStock}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-slate-400">Stock: {product.baseStock}</span>
+                            {product.pendingIncoming > 0 && (
+                              <span className="text-[10px] text-teal-700 bg-teal-100 px-2 py-0.5 rounded-full font-bold">+{product.pendingIncoming} incoming</span>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </button>
@@ -331,8 +494,8 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
         </div>
 
         {/* Cart & Checkout */}
-        <div className={`flex flex-col bg-white rounded-2xl shadow-xl border border-slate-100 min-h-0 ${
-          isProductPanelCollapsed ? 'flex-1' : 'w-96'
+        <div className={`flex flex-col bg-white rounded-2xl shadow-xl border border-slate-100 min-h-0 relative ${
+          isProductPanelCollapsed ? 'flex-1' : 'w-full lg:w-96'
         }`}>
           <div className="p-6 border-b border-slate-100 bg-slate-50 rounded-t-2xl flex justify-between items-center">
             <div>
@@ -377,6 +540,7 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
                       <button
                         onClick={() => updateQuantity(item.id, item.quantity - 1)}
                         className="p-1 hover:bg-slate-100 rounded text-slate-500"
+                        aria-label={`Decrease quantity for ${item.name}`}
                       >
                         <Minus size={14} />
                       </button>
@@ -386,10 +550,12 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
                         className="w-12 text-center text-sm font-bold border-none focus:ring-0 p-0"
                         value={item.quantity}
                         onChange={(e) => updateQuantity(item.id, parseInt(e.target.value) || 0)}
+                        aria-label={`Quantity for ${item.name}`}
                       />
                       <button
                         onClick={() => updateQuantity(item.id, item.quantity + 1)}
                         className="p-1 hover:bg-slate-100 rounded text-slate-500"
+                        aria-label={`Increase quantity for ${item.name}`}
                       >
                         <Plus size={14} />
                       </button>
@@ -397,6 +563,7 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
                     <button
                       onClick={() => removeFromCart(item.id)}
                       className="text-red-400 hover:text-red-600 p-2"
+                      aria-label={`Remove ${item.name} from cart`}
                     >
                       <Trash2 size={16} />
                     </button>
@@ -407,27 +574,14 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
           </div>
 
           {/* AI Warning Section */}
-          {interactionWarning && (
-            <div className="px-6 py-3 bg-amber-50 border-t border-amber-100">
-              <div className="flex items-start gap-2 text-amber-800 text-xs">
-                <ShieldCheck size={16} className="shrink-0 mt-0.5" />
-                <p>
-                  <strong>Clinical Alert:</strong> {interactionWarning}
-                </p>
-              </div>
-            </div>
-          )}
+          {/* Interaction warnings removed */}
 
           {/* Totals & Action */}
-          <div className="p-6 border-t border-slate-100 bg-slate-50 rounded-b-2xl">
-            <div className="space-y-2 mb-4 text-sm">
+          <div className="p-6 border-t border-slate-100 bg-white rounded-b-2xl sticky bottom-0 z-10">
+              <div className="space-y-2 mb-4 text-sm">
               <div className="flex justify-between text-slate-600">
                 <span>Subtotal</span>
                 <span>{subtotal.toLocaleString()} TZS</span>
-              </div>
-              <div className="flex justify-between text-slate-600">
-                <span>VAT (18%)</span>
-                <span>{vat.toLocaleString()} TZS</span>
               </div>
               <div className="flex justify-between font-bold text-xl text-teal-900 pt-2 border-t border-slate-200">
                 <span>Total</span>
@@ -443,174 +597,176 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
               }}
               className="w-full py-4 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg shadow-blue-600/20 transition-all flex justify-center items-center gap-2"
             >
-              <Send size={18} /> Send to Finance
+              <Send size={18} /> Create Invoice
             </button>
             <p className="text-xs text-center text-slate-500 mt-2">
-              Inventory will be deducted after payment.
+              Invoice will be sent to Finance for payment.
             </p>
           </div>
         </div>
       </div>
 
-      {/* Customer Name & Preview Modal */}
+      {/* Customer Name Modal (simplified) */}
       {customerModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 no-print">
-          <div
-            className={`bg-white rounded-2xl w-full ${previewMode ? 'max-w-2xl' : 'max-w-sm'
-              } overflow-hidden animate-in fade-in zoom-in duration-200 transition-all no-print`}
-          >
-            {!previewMode ? (
-              <>
-                <div className="p-6 border-b border-slate-100 text-center relative">
-                  <h3 className="text-xl font-bold text-slate-900">Order Details</h3>
-                  <p className="text-slate-500 text-sm">Step 1: Assign to Customer</p>
-                  <button
-                    onClick={() => setCustomerModalOpen(false)}
-                    className="absolute right-4 top-4 text-slate-400 hover:text-slate-600"
-                  >
-                    <X size={20} />
-                  </button>
+          <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden animate-in fade-in zoom-in duration-200">
+            <div className="p-6 border-b border-slate-100 text-center relative">
+              <h3 className="text-xl font-bold text-slate-900">Sale Details</h3>
+              <p className="text-slate-500 text-sm">Enter customer information</p>
+              <button
+                onClick={() => setCustomerModalOpen(false)}
+                className="absolute right-4 top-4 text-slate-400 hover:text-slate-600"
+                aria-label="Close sale details modal"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              {/* Saved Customers Dropdown */}
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2 flex items-center gap-2">
+                  <Users size={16} />
+                  Select Saved Customer
+                </label>
+                <select
+                  className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                  value={selectedCustomer?.id || ''}
+                  onChange={(e) => {
+                    const customer = savedCustomers.find(c => c.id === e.target.value);
+                    if (customer) {
+                      setSelectedCustomer(customer);
+                      setCustomerName(customer.name);
+                      setCustomerPhone(customer.phone || '');
+                    }
+                  }}
+                >
+                  <option value="">-- Walk-in Customer --</option>
+                  {savedCustomers.map(customer => (
+                    <option key={customer.id} value={customer.id}>
+                      {customer.name} {customer.phone ? `(${customer.phone})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              
+              {/* Manual Entry */}
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2">
+                  Customer Name
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  placeholder="e.g. Walk-in Client, John Doe"
+                  className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                  value={customerName}
+                  onChange={(e) => setCustomerName(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2">
+                  Customer Phone (Optional)
+                </label>
+                <input
+                  type="tel"
+                  placeholder="e.g. +255 700 123 456"
+                  className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                  value={customerPhone}
+                  onChange={(e) => setCustomerPhone(e.target.value)}
+                />
+              </div>
+              
+              {/* Selected Customer Info */}
+              {selectedCustomer && (
+                <div className="p-3 bg-blue-50 rounded-lg border border-blue-200">
+                  <p className="text-sm font-medium text-blue-800">Selected Customer:</p>
+                  <p className="font-bold text-blue-900">{selectedCustomer.name}</p>
+                  {selectedCustomer.discountPercentage > 0 && (
+                    <p className="text-sm text-blue-600">
+                      Discount: {selectedCustomer.discountPercentage}%
+                    </p>
+                  )}
+                  {selectedCustomer.creditLimit > 0 && (
+                    <p className="text-sm text-blue-600">
+                      Credit Limit: TZS {selectedCustomer.creditLimit.toLocaleString()}
+                    </p>
+                  )}
                 </div>
-                <div className="p-6">
-                  <label className="block text-sm font-bold text-slate-700 mb-2">
-                    Customer Name
-                  </label>
-                  <input
-                    type="text"
-                    autoFocus
-                    placeholder="e.g. Walk-in Client, John Doe"
-                    className="w-full p-3 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
-                    value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)}
-                  />
-                </div>
-                <div className="p-6 bg-slate-50 flex justify-end gap-3">
-                  <button
-                    onClick={() => setCustomerModalOpen(false)}
-                    className="px-4 py-2 text-slate-500 font-medium"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (!customerName.trim()) {
-                        showError('Validation', 'Please enter a customer name.');
-                        return;
-                      }
-                      setPreviewMode(true);
-                    }}
-                    className="px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 shadow-md flex items-center gap-2"
-                  >
-                    Preview Invoice <ArrowRight size={16} />
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="p-4 bg-slate-800 text-white flex justify-between items-center no-print">
-                  <h3 className="font-bold flex items-center gap-2">
-                    <FileText size={18} className="text-blue-400" /> Proforma Invoice Preview
-                  </h3>
-                  <button
-                    onClick={() => setCustomerModalOpen(false)}
-                    className="text-slate-400 hover:text-white"
-                  >
-                    <X size={20} />
-                  </button>
-                </div>
-
-                <div className="p-8 bg-slate-50 max-h-[60vh] overflow-y-auto">
-                  <div className="bg-white border border-slate-200 p-6 shadow-sm text-sm">
-                    {/* Invoice Header */}
-                    <div className="flex justify-between items-start mb-6 border-b border-slate-100 pb-4">
-                      <div className="flex items-center gap-4">
-                        {companyLogo && <img src={companyLogo} alt="Company Logo" className="w-16 h-16 object-contain" />}
-                        <div>
-                          <h1 className="text-lg font-bold text-slate-900 uppercase">Proforma Invoice</h1>
-                          <p className="text-slate-500">Date: {new Date().toLocaleDateString()}</p>
-                          <p className="text-slate-500">Branch: {branchName}</p>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <h2 className="font-bold text-slate-900">PMS Pharmacy</h2>
-                        <p className="text-slate-500">TIN: 123-456-789</p>
-                        <p className="text-slate-500">
-                          Bill To: <span className="font-bold text-slate-800">{customerName}</span>
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Items Table */}
-                    <table className="w-full text-left mb-6">
-                      <thead className="bg-slate-50 text-slate-500">
-                        <tr>
-                          <th className="py-2 pl-2">Item</th>
-                          <th className="py-2 text-center">Qty</th>
-                          <th className="py-2 text-right">Price</th>
-                          <th className="py-2 text-right pr-2">Total</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {cart.map((item, idx) => (
-                          <tr key={idx}>
-                            <td className="py-2 pl-2 font-medium">{item.name}</td>
-                            <td className="py-2 text-center">{item.quantity}</td>
-                            <td className="py-2 text-right">{(item.price || 0).toLocaleString()}</td>
-                            <td className="py-2 text-right pr-2">
-                              {((item.price || 0) * item.quantity).toLocaleString()}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-
-                    {/* Totals */}
-                    <div className="flex justify-end">
-                      <div className="w-48 space-y-2">
-                        <div className="flex justify-between text-slate-500">
-                          <span>Subtotal:</span>
-                          <span>{subtotal.toLocaleString()}</span>
-                        </div>
-                        <div className="flex justify-between text-slate-500">
-                          <span>VAT (18%):</span>
-                          <span>{vat.toLocaleString()}</span>
-                        </div>
-                        <div className="flex justify-between font-bold text-lg text-slate-900 border-t border-slate-200 pt-2">
-                          <span>Total:</span>
-                          <span>{total.toLocaleString()} TZS</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-4 bg-white border-t border-slate-100 flex justify-between gap-3 no-print">
-                  <button
-                    onClick={() => setPreviewMode(false)}
-                    className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-50 rounded-lg flex items-center gap-2"
-                  >
-                    <ArrowLeft size={16} /> Back to Edit
-                  </button>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={handlePrintProforma}
-                      className="px-4 py-2 bg-slate-800 text-white font-medium rounded-lg hover:bg-slate-900 flex items-center gap-2"
-                    >
-                      <Printer size={16} /> Print
-                    </button>
-                    <button
-                      onClick={handleGenerateProforma}
-                      className="px-6 py-2 bg-teal-600 text-white font-bold rounded-lg hover:bg-teal-700 shadow-md flex items-center gap-2"
-                    >
-                      <Send size={16} /> Confirm & Send
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
+              )}
+            </div>
+            <div className="p-6 bg-slate-50 flex justify-end gap-3">
+              <button
+                onClick={() => setCustomerModalOpen(false)}
+                className="px-4 py-2 text-slate-500 font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handlePreviewInvoice}
+                className="px-6 py-2 bg-green-600 text-white font-bold rounded-lg hover:bg-green-700 shadow-md flex items-center gap-2"
+              >
+                <Eye size={16} /> Preview Invoice
+              </button>
+              <button
+                onClick={handleCreateInvoiceFromPOS}
+                className="px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 shadow-md flex items-center gap-2"
+              >
+                <Send size={16} /> Create Invoice
+              </button>
+            </div>
           </div>
         </div>
       )}
+
+      {/* Invoice Preview Modal (same as Finance) */}
+      <InvoicePreviewModal
+        showPreviewModal={showPreviewModal}
+        setShowPreviewModal={setShowPreviewModal}
+        selectedInvoice={previewInvoice}
+        handlePrintInvoice={() => {
+          setShowPreviewModal(false);
+          if (previewInvoice) {
+            const customerInfo = {
+              name: previewInvoice.customerName,
+              address: '',
+              email: previewInvoice.customerEmail || '',
+              phone: previewInvoice.customerPhone || ''
+            };
+            const invoiceData = {
+              id: previewInvoice.id,
+              dateIssued: previewInvoice.dateIssued || '',
+              client: customerInfo,
+              items: (previewInvoice.items || []).map(item => ({
+                description: item.name || 'Item',
+                quantity: item.quantity,
+                price: item.price,
+                total: item.price * item.quantity
+              })),
+              subtotal: previewInvoice.totalAmount || 0,
+              tax: 0,
+              total: previewInvoice.totalAmount || 0,
+              paymentTerms: previewInvoice.description || 'Payment due upon receipt',
+              paymentMethod: previewInvoice.paymentMethod || 'Cash'
+            };
+            const companyData = {
+              companyName: companySettings.companyName,
+              tinNumber: companySettings.tinNumber,
+              address: companySettings.address,
+              phone: companySettings.phone,
+              email: companySettings.email,
+              logo: companySettings.logo
+            };
+            const html = renderToStaticMarkup(
+              <ModernInvoicePrintTemplate invoice={invoiceData} companySettings={companyData} />
+            );
+            openCustomPrint(html, 'Invoice Print');
+          }
+        }}
+        openPaymentModal={(invoice) => {
+          setSelectedInvoice(invoice);
+          setShowPaymentModal(true);
+        }}
+      />
 
       {/* Print Template - Proforma Invoice */}
       <div className="print-only">
@@ -624,7 +780,7 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
           </div>
           <hr className="border-black my-4" />
           <div className="flex justify-between font-bold text-lg mb-2">
-            <span>PROFORMA INVOICE</span>
+            <span>SALE RECEIPT</span>
           </div>
           <p>Date: {new Date().toLocaleDateString()}</p>
           <p>Customer: {customerName}</p>
@@ -655,18 +811,19 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
             <span>{total.toLocaleString()} TZS</span>
           </div>
           <div className="mt-8 text-center text-sm">
-            <p>This is not a fiscal receipt. Please pay at Finance.</p>
+            <p>Thank you for your business!</p>
+            <p>Sale completed and inventory updated.</p>
           </div>
         </div>
       </div>
 
       {/* Success Toast */}
       {successMsg && (
-        <div className="fixed bottom-8 right-8 bg-teal-900 text-white px-6 py-4 rounded-xl shadow-2xl flex items-center gap-3 animate-in slide-in-from-bottom-10 fade-in duration-300 z-50 no-print">
-          <CheckCircle className="text-teal-400" />
+        <div className="fixed bottom-8 right-8 bg-green-900 text-white px-6 py-4 rounded-xl shadow-2xl flex items-center gap-3 animate-in slide-in-from-bottom-10 fade-in duration-300 z-50 no-print">
+          <CheckCircle className="text-green-400" />
           <div>
-            <h4 className="font-bold">Sent to Finance</h4>
-            <p className="text-sm text-teal-100">{successMsg}</p>
+            <h4 className="font-bold">Sale Completed</h4>
+            <p className="text-sm text-green-100">{successMsg}</p>
           </div>
         </div>
       )}
@@ -681,6 +838,56 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
           </div>
         </div>
       )}
+
+      {/* Invoice Preview Modal (same as Finance) */}
+      <InvoicePreviewModal
+        showPreviewModal={showPreviewModal}
+        setShowPreviewModal={setShowPreviewModal}
+        selectedInvoice={previewInvoice}
+        handlePrintInvoice={() => {
+          setShowPreviewModal(false);
+          if (previewInvoice) {
+            const customerInfo = {
+              name: previewInvoice.customerName,
+              address: '',
+              email: previewInvoice.customerEmail || '',
+              phone: previewInvoice.customerPhone || ''
+            };
+            const invoiceData = {
+              id: previewInvoice.id,
+              dateIssued: previewInvoice.dateIssued || '',
+              client: customerInfo,
+              items: (previewInvoice.items || []).map(item => ({
+                description: item.name || 'Item',
+                quantity: item.quantity,
+                price: item.price,
+                total: item.price * item.quantity
+              })),
+              subtotal: previewInvoice.totalAmount || 0,
+              tax: 0,
+              total: previewInvoice.totalAmount || 0,
+              paymentTerms: previewInvoice.description || 'Payment due upon receipt',
+              paymentMethod: previewInvoice.paymentMethod || 'Cash'
+            };
+            const companyData = {
+              companyName: companySettings.companyName,
+              tinNumber: companySettings.tinNumber,
+              address: companySettings.address,
+              phone: companySettings.phone,
+              email: companySettings.email,
+              logo: companySettings.logo
+            };
+            const html = renderToStaticMarkup(
+              <ModernInvoicePrintTemplate invoice={invoiceData} companySettings={companyData} />
+            );
+            openCustomPrint(html, 'Invoice Print');
+          }
+        }}
+        openPaymentModal={(invoice) => {
+          setSelectedInvoice(invoice);
+          setShowPaymentModal(true);
+        }}
+      />
     </div>
   );
 };
