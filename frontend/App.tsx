@@ -119,6 +119,159 @@ const AppContent: React.FC = () => {
       isHeadOffice: false
     }
   ];
+  const demoProductSeed = [
+    { id: 'PRD-DEMO-001', name: 'Paracetamol 500mg', genericName: 'Paracetamol', category: 'Analgesic', costPrice: 80, price: 220, unit: 'Tablet', minStockLevel: 120, requiresPrescription: false },
+    { id: 'PRD-DEMO-002', name: 'Amoxicillin 500mg', genericName: 'Amoxicillin', category: 'Antibiotic', costPrice: 450, price: 850, unit: 'Capsule', minStockLevel: 60, requiresPrescription: true },
+    { id: 'PRD-DEMO-003', name: 'Ibuprofen 400mg', genericName: 'Ibuprofen', category: 'Anti-inflammatory', costPrice: 120, price: 320, unit: 'Tablet', minStockLevel: 80, requiresPrescription: false },
+    { id: 'PRD-DEMO-004', name: 'Cetirizine 10mg', genericName: 'Cetirizine', category: 'Antihistamine', costPrice: 90, price: 260, unit: 'Tablet', minStockLevel: 70, requiresPrescription: false },
+    { id: 'PRD-DEMO-005', name: 'Metformin 500mg', genericName: 'Metformin', category: 'Diabetes', costPrice: 210, price: 480, unit: 'Tablet', minStockLevel: 75, requiresPrescription: true },
+    { id: 'PRD-DEMO-006', name: 'ORS Sachet', genericName: 'Oral Rehydration Salts', category: 'Rehydration', costPrice: 200, price: 520, unit: 'Sachet', minStockLevel: 60, requiresPrescription: false },
+    { id: 'PRD-DEMO-007', name: 'Omeprazole 20mg', genericName: 'Omeprazole', category: 'Gastro', costPrice: 180, price: 430, unit: 'Capsule', minStockLevel: 50, requiresPrescription: false },
+    { id: 'PRD-DEMO-008', name: 'Vitamin C 1000mg', genericName: 'Ascorbic Acid', category: 'Supplement', costPrice: 150, price: 360, unit: 'Tablet', minStockLevel: 65, requiresPrescription: false },
+    { id: 'PRD-DEMO-009', name: 'Cough Syrup 100ml', genericName: 'Dextromethorphan', category: 'Respiratory', costPrice: 700, price: 1300, unit: 'Bottle', minStockLevel: 40, requiresPrescription: false },
+    { id: 'PRD-DEMO-010', name: 'Azithromycin 500mg', genericName: 'Azithromycin', category: 'Antibiotic', costPrice: 900, price: 1650, unit: 'Tablet', minStockLevel: 30, requiresPrescription: true }
+  ];
+  const demoProducts: Product[] = demoProductSeed.map((item) => ({
+    ...item,
+    batches: [],
+    totalStock: 0
+  }));
+  const buildDemoInventory = (branchCode: string, multiplier: number): BranchInventoryItem[] =>
+    demoProductSeed.map((product, index) => {
+      const qty = Math.max(20, Math.round((120 - index * 6) * multiplier));
+      return {
+        productId: product.id,
+        quantity: qty,
+        customPrice: product.price + (branchCode === 'BR010' ? 10 : 0),
+        batches: [
+          {
+            batchNumber: `${branchCode}-${product.id.split('-').pop()}-A`,
+            expiryDate: `2027-${String((index % 9) + 1).padStart(2, '0')}-28`,
+            quantity: qty,
+            status: 'ACTIVE'
+          }
+        ]
+      };
+    });
+  const demoInventory: Record<string, BranchInventoryItem[]> = {
+    HEAD_OFFICE: buildDemoInventory('HOF', 1.8),
+    BR009: buildDemoInventory('BR009', 1.2),
+    BR010: buildDemoInventory('BR010', 1.0)
+  };
+  const demoSales: Sale[] = [
+    {
+      id: 'SALE-DEMO-BR009-001',
+      date: new Date(Date.now() - 1000 * 60 * 60 * 28).toISOString(),
+      branchId: 'BR009',
+      items: [
+        { id: 'PRD-DEMO-001', name: 'Paracetamol 500mg', quantity: 20, price: 220, costPrice: 80, selectedBatch: 'BR009-001-A', discount: 0 },
+        { id: 'PRD-DEMO-003', name: 'Ibuprofen 400mg', quantity: 10, price: 320, costPrice: 120, selectedBatch: 'BR009-003-A', discount: 0 }
+      ],
+      totalAmount: 7600,
+      totalCost: 2800,
+      profit: 4800,
+      paymentMethod: PaymentMethod.CASH,
+      customerName: 'Masaki Walk-in',
+      status: 'COMPLETED'
+    },
+    {
+      id: 'SALE-DEMO-BR010-001',
+      date: new Date(Date.now() - 1000 * 60 * 60 * 8).toISOString(),
+      branchId: 'BR010',
+      items: [
+        { id: 'PRD-DEMO-006', name: 'ORS Sachet', quantity: 15, price: 530, costPrice: 200, selectedBatch: 'BR010-006-A', discount: 0 },
+        { id: 'PRD-DEMO-009', name: 'Cough Syrup 100ml', quantity: 6, price: 1310, costPrice: 700, selectedBatch: 'BR010-009-A', discount: 0 }
+      ],
+      totalAmount: 15810,
+      totalCost: 7200,
+      profit: 8610,
+      paymentMethod: PaymentMethod.MOBILE_MONEY,
+      customerName: 'Mikocheni Walk-in',
+      status: 'COMPLETED'
+    }
+  ];
+  const demoInvoices: Invoice[] = [
+    {
+      id: 'INV-DEMO-BR009-001',
+      branchId: 'BR009',
+      customerName: 'Masaki Clinic',
+      customerPhone: '+255711000001',
+      dateIssued: new Date(Date.now() - 1000 * 60 * 60 * 24 * 2).toISOString().split('T')[0],
+      dueDate: new Date(Date.now() + 1000 * 60 * 60 * 24 * 10).toISOString().split('T')[0],
+      totalAmount: 125000,
+      paidAmount: 70000,
+      status: 'PARTIAL',
+      description: 'Sample invoice for clinic credit account',
+      source: 'MANUAL',
+      payments: [
+        {
+          id: 'PAY-DEMO-BR009-001',
+          amount: 70000,
+          discount: 0,
+          date: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+          receiptNumber: 'RCPT-DEMO-BR009-001',
+          method: PaymentMethod.MOBILE_MONEY,
+          recordedBy: 'DEMO-USER-001'
+        }
+      ]
+    },
+    {
+      id: 'INV-DEMO-BR010-001',
+      branchId: 'BR010',
+      customerName: 'Mikocheni Pharmacy Partner',
+      customerPhone: '+255711000002',
+      dateIssued: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString().split('T')[0],
+      dueDate: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString().split('T')[0],
+      totalAmount: 98000,
+      paidAmount: 98000,
+      status: 'PAID',
+      description: 'Sample wholesale invoice',
+      source: 'MANUAL',
+      payments: [
+        {
+          id: 'PAY-DEMO-BR010-001',
+          amount: 98000,
+          discount: 2000,
+          discountPercent: 2.04,
+          date: new Date(Date.now() - 1000 * 60 * 60 * 20).toISOString(),
+          receiptNumber: 'RCPT-DEMO-BR010-001',
+          method: PaymentMethod.MOBILE_MONEY,
+          recordedBy: 'DEMO-USER-001'
+        }
+      ]
+    }
+  ];
+  const demoExpenses: Expense[] = [
+    {
+      id: 900001,
+      category: 'Utilities',
+      description: 'Electricity - Masaki sample',
+      amount: 185000,
+      date: new Date(Date.now() - 1000 * 60 * 60 * 24 * 3).toISOString().split('T')[0],
+      status: 'Approved',
+      branchId: 'BR009'
+    },
+    {
+      id: 900002,
+      category: 'Rent',
+      description: 'Shop rent - Mikocheni sample',
+      amount: 850000,
+      date: new Date(Date.now() - 1000 * 60 * 60 * 24 * 5).toISOString().split('T')[0],
+      status: 'Approved',
+      branchId: 'BR010'
+    }
+  ];
+  const demoStaffList: StaffType[] = [
+    { id: 'DEMO-USER-001', name: 'Demo Admin', role: UserRole.SUPER_ADMIN, branchId: 'HEAD_OFFICE', email: 'demo@pms.local', phone: '+255700000000', status: 'ACTIVE', username: 'demo' },
+    { id: 'DEMO-BR009-MGR', name: 'Asha M. Kweka', role: UserRole.BRANCH_MANAGER, branchId: 'BR009', email: 'asha.masaki@pms.local', phone: '+255700900001', status: 'ACTIVE', username: 'masaki_manager' },
+    { id: 'DEMO-BR009-DSP', name: 'Rehema N. Ally', role: UserRole.DISPENSER, branchId: 'BR009', email: 'rehema.masaki@pms.local', phone: '+255700900002', status: 'ACTIVE', username: 'masaki_disp' },
+    { id: 'DEMO-BR010-MGR', name: 'John P. Mtei', role: UserRole.BRANCH_MANAGER, branchId: 'BR010', email: 'john.mikocheni@pms.local', phone: '+255700910001', status: 'ACTIVE', username: 'miko_manager' },
+    { id: 'DEMO-BR010-DSP', name: 'Diana S. Mwaipo', role: UserRole.DISPENSER, branchId: 'BR010', email: 'diana.mikocheni@pms.local', phone: '+255700910002', status: 'ACTIVE', username: 'miko_disp' }
+  ];
+  const demoSettings: SystemSetting[] = [
+    { id: 'SET-DEMO-001', category: 'general', settingKey: 'sessionTimeout', settingValue: '60', dataType: 'number', description: 'Demo session timeout' },
+    { id: 'SET-DEMO-002', category: 'company', settingKey: 'companyName', settingValue: 'PMS Demo Environment', dataType: 'string', description: 'Demo company name' }
+  ];
   const normalizeBranchId = (value: unknown) => String(value ?? '').trim();
   const branchIdVariants = (value: unknown) => {
     const raw = normalizeBranchId(value).toUpperCase();
@@ -212,8 +365,8 @@ const AppContent: React.FC = () => {
           const user = normalizeStaffUser(JSON.parse(savedUser));
           if (isGithubPagesDemo && isDemoSession()) {
             setCurrentUser(user);
-            setBranches(demoBranches);
-            setCurrentBranchId(user.branchId || 'HEAD_OFFICE');
+            const loadedBranches = await loadData(user);
+            setCurrentBranchId(resolveBranchContext(user, loadedBranches));
             return;
           }
 
@@ -353,6 +506,20 @@ const AppContent: React.FC = () => {
 
   // ✅ NEW: Separate function to load data (only call AFTER login)
   const loadData = async (sessionUser?: StaffType | null): Promise<Branch[]> => {
+    if (isGithubPagesDemo && isDemoSession()) {
+      setBranches(demoBranches);
+      setProducts(demoProducts.map((item) => ({ ...item })));
+      setInventory(JSON.parse(JSON.stringify(demoInventory)));
+      setStaffList(demoStaffList.map((item) => ({ ...item })));
+      setTransfers([]);
+      setInvoices(demoInvoices.map((item) => ({ ...item, payments: [...item.payments] })));
+      setExpenses(demoExpenses.map((item) => ({ ...item })));
+      setSales(demoSales.map((item) => ({ ...item, items: item.items.map((saleItem) => ({ ...saleItem })) })));
+      setDisposalRequests([]);
+      setSettings(demoSettings.map((item) => ({ ...item })));
+      return demoBranches;
+    }
+
     setIsLoading(true);
 
     // Add timeout to prevent infinite loading
