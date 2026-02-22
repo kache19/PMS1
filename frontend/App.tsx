@@ -77,6 +77,7 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
 
 const AppContent: React.FC = () => {
   const { showSuccess, showError, showWarning, showInfo } = useNotifications();
+  const isGithubPagesDemo = typeof window !== 'undefined' && window.location.hostname.endsWith('github.io');
   const [currentUser, setCurrentUser] = useState<StaffType | null>(null);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [currentBranchId, setCurrentBranchId] = useState('HEAD_OFFICE');
@@ -139,6 +140,7 @@ const AppContent: React.FC = () => {
   };
 
   const getStoredToken = () => localStorage.getItem('authToken') || sessionStorage.getItem('authToken');
+  const isDemoSession = () => localStorage.getItem('pmsDemoMode') === '1';
   const isTokenExpired = (token: string) => {
     try {
       const parts = token.split('.');
@@ -171,6 +173,7 @@ const AppContent: React.FC = () => {
     setSettings([]);
     localStorage.removeItem('user');
     localStorage.removeItem('authToken');
+    localStorage.removeItem('pmsDemoMode');
     sessionStorage.removeItem('user');
     sessionStorage.removeItem('authToken');
   };
@@ -183,10 +186,16 @@ const AppContent: React.FC = () => {
         const savedToken = localStorage.getItem('authToken') || sessionStorage.getItem('authToken');
 
         if (savedUser && savedToken) {
+          const user = normalizeStaffUser(JSON.parse(savedUser));
+          if (isGithubPagesDemo && isDemoSession()) {
+            setCurrentUser(user);
+            setCurrentBranchId(user.branchId || 'HEAD_OFFICE');
+            return;
+          }
+
           // Validate token by making a test API call
           try {
             await api.getProducts(); // Test with a protected endpoint
-            const user = normalizeStaffUser(JSON.parse(savedUser));
             setCurrentUser(user);
             // Load data first to get branches, then set branch ID
             const loadedBranches = await loadData(user);

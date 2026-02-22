@@ -8,7 +8,7 @@ import {
   Loader2,
   CheckCircle
 } from 'lucide-react';
-import { Staff } from '../types';
+import { Staff, UserRole } from '../types';
 import { api } from '../services/api';
 
 interface LoginProps {
@@ -22,11 +22,53 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
   const [loggedInUser, setLoggedInUser] = useState<Staff | null>(null);
+  const isGithubPagesDemo = typeof window !== 'undefined' && window.location.hostname.endsWith('github.io');
+
+  const createDemoToken = () => {
+    const toBase64Url = (input: string) =>
+      btoa(input).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    const now = Math.floor(Date.now() / 1000);
+    const header = toBase64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+    const payload = toBase64Url(JSON.stringify({
+      id: 'DEMO-USER-001',
+      role: 'SUPER_ADMIN',
+      branch_id: 'HEAD_OFFICE',
+      name: 'Demo Admin',
+      iat: now,
+      exp: now + (365 * 24 * 60 * 60)
+    }));
+    return `${header}.${payload}.demo-signature`;
+  };
+
+  const loginWithDemoUser = () => {
+    const demoUser: Staff = {
+      id: 'DEMO-USER-001',
+      name: 'Demo Admin',
+      role: UserRole.SUPER_ADMIN,
+      branchId: 'HEAD_OFFICE',
+      email: 'demo@pms.local',
+      phone: '+255700000000',
+      status: 'ACTIVE',
+      username: 'demo'
+    };
+
+    setLoggedInUser(demoUser);
+    setShowSuccess(true);
+    localStorage.setItem('pmsDemoMode', '1');
+    setTimeout(() => {
+      onLogin(demoUser, createDemoToken());
+    }, 800);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setIsLoading(true);
+
+    if (isGithubPagesDemo) {
+      loginWithDemoUser();
+      return;
+    }
 
     // Validation
     if (!username.trim() || !password.trim()) {
@@ -65,7 +107,12 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
       }, 1200);
     } catch (err: any) {
       console.error('Login error:', err);
-      setIsLoading(false); // ✅ CRITICAL: Always set loading to false on error
+      setIsLoading(false);
+
+      if (isGithubPagesDemo) {
+        loginWithDemoUser();
+        return;
+      }
 
       // Better error messaging based on error type
       const errorMessage = err?.message || 'Unknown error occurred';
@@ -153,6 +200,11 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           <div className="max-w-sm mx-auto w-full">
             <h2 className="text-xl md:text-2xl lg:text-3xl font-bold text-slate-900 mb-1 md:mb-2">Welcome Back</h2>
             <p className="text-xs md:text-sm text-slate-500 mb-3 md:mb-6">Sign in to access your pharmacy dashboard.</p>
+            {isGithubPagesDemo && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5 mb-3">
+                Demo mode: click Sign In to continue.
+              </p>
+            )}
 
             <form onSubmit={handleSubmit} className="space-y-3">
               {/* Username Input */}
@@ -171,7 +223,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                     }}
                     disabled={isLoading || showSuccess}
                     autoComplete="username"
-                    required
+                    required={!isGithubPagesDemo}
                   />
                 </div>
               </div>
@@ -192,7 +244,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                     }}
                     disabled={isLoading || showSuccess}
                     autoComplete="current-password"
-                    required
+                    required={!isGithubPagesDemo}
                   />
                 </div>
               </div>
