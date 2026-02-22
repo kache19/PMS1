@@ -96,6 +96,29 @@ const AppContent: React.FC = () => {
   const [settings, setSettings] = useState<SystemSetting[]>([]);
   const lastActivityRef = useRef<number>(Date.now());
   const isRefreshingTokenRef = useRef<boolean>(false);
+  const demoBranches: Branch[] = [
+    {
+      id: 'HEAD_OFFICE',
+      name: 'Head Office (Global View)',
+      location: 'Central Office',
+      status: 'ACTIVE',
+      isHeadOffice: true
+    },
+    {
+      id: 'BR009',
+      name: 'Masaki Medics',
+      location: 'Masaki, Dar es Salaam',
+      status: 'ACTIVE',
+      isHeadOffice: false
+    },
+    {
+      id: 'BR010',
+      name: 'Mikocheni Branch',
+      location: 'Mikocheni, Dar es Salaam',
+      status: 'ACTIVE',
+      isHeadOffice: false
+    }
+  ];
   const normalizeBranchId = (value: unknown) => String(value ?? '').trim();
   const branchIdVariants = (value: unknown) => {
     const raw = normalizeBranchId(value).toUpperCase();
@@ -189,6 +212,7 @@ const AppContent: React.FC = () => {
           const user = normalizeStaffUser(JSON.parse(savedUser));
           if (isGithubPagesDemo && isDemoSession()) {
             setCurrentUser(user);
+            setBranches(demoBranches);
             setCurrentBranchId(user.branchId || 'HEAD_OFFICE');
             return;
           }
@@ -343,6 +367,9 @@ const AppContent: React.FC = () => {
       let branchesData: Branch[] = [];
       try {
         branchesData = await api.getBranches();
+        if (isGithubPagesDemo && branchesData.length === 0) {
+          branchesData = demoBranches;
+        }
         if (branchesData.length === 0 && sessionUser?.branchId) {
           const fallbackBranch = await api.getBranch(String(sessionUser.branchId));
           if (fallbackBranch) branchesData = [fallbackBranch];
@@ -350,6 +377,10 @@ const AppContent: React.FC = () => {
         setBranches(branchesData);
       } catch (error) {
         console.error('Failed to load branches:', error);
+        if (isGithubPagesDemo) {
+          branchesData = demoBranches;
+          setBranches(branchesData);
+        } else 
         if (sessionUser?.branchId) {
           const fallbackBranch = await api.getBranch(String(sessionUser.branchId)).catch(() => null);
           branchesData = fallbackBranch ? [fallbackBranch] : [];
