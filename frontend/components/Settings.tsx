@@ -30,6 +30,7 @@ import {
 import { BranchInventoryItem, Sale, Expense, Invoice, SystemSetting, LoginTracker } from '../types';
 import { api, API_URL } from '../services/api';
 import { useNotifications } from './NotificationContext';
+import { runWithPreservedWindowScroll } from '../utils/scrollStability';
 
 interface Session {
   id: string;
@@ -239,7 +240,9 @@ const Settings: React.FC<SettingsProps> = ({
     loadData();
 
     // Set up polling every 30 seconds
-    pollingInterval = setInterval(loadData, 30000) as unknown as number;
+    pollingInterval = setInterval(() => {
+      void runWithPreservedWindowScroll(() => loadData());
+    }, 30000) as unknown as number;
 
     return () => {
       mounted = false;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Lock, AlertTriangle, RefreshCw } from 'lucide-react';
 import Layout from './components/Layout';
 import Login from './components/Login';
@@ -29,7 +29,6 @@ interface ErrorBoundaryProps {
 }
 
 class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  public readonly props: ErrorBoundaryProps;
   state: ErrorBoundaryState = { hasError: false, error: undefined };
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
@@ -94,53 +93,233 @@ const AppContent: React.FC = () => {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [staffList, setStaffList] = useState<StaffType[]>([]);
   const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const lastActivityRef = useRef<number>(Date.now());
+  const isRefreshingTokenRef = useRef<boolean>(false);
+  const normalizeBranchId = (value: unknown) => String(value ?? '').trim();
+  const branchIdVariants = (value: unknown) => {
+    const raw = normalizeBranchId(value).toUpperCase();
+    if (!raw) return [];
+    const variants = new Set<string>([raw]);
+    const prefixed = raw.match(/^BR0*(\d+)$/);
+    if (prefixed) variants.add(String(Number(prefixed[1])));
+    if (/^\d+$/.test(raw)) variants.add(`BR${raw.padStart(3, '0')}`);
+    return Array.from(variants);
+  };
+  const branchIdsMatch = (a: unknown, b: unknown) => {
+    const aVariants = branchIdVariants(a);
+    const bVariants = new Set(branchIdVariants(b));
+    return aVariants.some((id) => bVariants.has(id));
+  };
+  const normalizeRole = (role: unknown) => {
+    const key = String(role ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (key === 'SUPERADMIN') return UserRole.SUPER_ADMIN;
+    if (key === 'BRANCHMANAGER') return UserRole.BRANCH_MANAGER;
+    if (key === 'PHARMACIST') return UserRole.PHARMACIST;
+    if (key === 'DISPENSER') return UserRole.DISPENSER;
+    if (key === 'STOREKEEPER') return UserRole.STOREKEEPER;
+    if (key === 'INVENTORYCONTROLLER') return UserRole.INVENTORY_CONTROLLER;
+    if (key === 'ACCOUNTANT') return UserRole.ACCOUNTANT;
+    if (key === 'AUDITOR') return UserRole.AUDITOR;
+    return role as UserRole;
+  };
+  const normalizeStaffUser = (user: any): StaffType => ({
+    ...user,
+    role: normalizeRole(user?.role),
+    branchId: user?.branchId ?? user?.branch_id ?? ''
+  });
+  const findBranchById = (allBranches: Branch[], branchId: unknown) =>
+    allBranches.find((branch) => branchIdsMatch(branch.id, branchId));
+  const resolveBranchContext = (user: StaffType, allBranches: Branch[]): string => {
+    if (user.role === UserRole.SUPER_ADMIN) {
+      return allBranches.find((b) => b.isHeadOffice)?.id || 'HEAD_OFFICE';
+    }
+    const matchedBranch = findBranchById(allBranches, user.branchId);
+    if (matchedBranch) return matchedBranch.id;
+    return normalizeBranchId(user.branchId) || 'HEAD_OFFICE';
+  };
+
+  const getStoredToken = () => localStorage.getItem('authToken') || sessionStorage.getItem('authToken');
+  const isTokenExpired = (token: string) => {
+    try {
+      const parts = token.split('.');
+      if (parts.length < 2) return true;
+      const base64Url = parts[1];
+      const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+      const payload = JSON.parse(atob(padded));
+      const exp = Number(payload?.exp || 0);
+      if (!exp) return true;
+      return (exp * 1000) <= Date.now();
+    } catch {
+      return true;
+    }
+  };
+
+  const clearClientSession = () => {
+    setCurrentUser(null);
+    setActiveTab('dashboard');
+    setCurrentBranchId('HEAD_OFFICE');
+    setProducts([]);
+    setInventory({});
+    setTransfers([]);
+    setSales([]);
+    setInvoices([]);
+    setExpenses([]);
+    setDisposalRequests([]);
+    setBranches([]);
+    setStaffList([]);
+    setSettings([]);
+    localStorage.removeItem('user');
+    localStorage.removeItem('authToken');
+    sessionStorage.removeItem('user');
+    sessionStorage.removeItem('authToken');
+  };
 
   // ✅ NEW: Check if user was previously logged in (from localStorage) and validate token
   useEffect(() => {
     const checkAuth = async () => {
       try {
-        const savedUser = localStorage.getItem('user');
-        const savedToken = localStorage.getItem('authToken');
+        const savedUser = localStorage.getItem('user') || sessionStorage.getItem('user');
+        const savedToken = localStorage.getItem('authToken') || sessionStorage.getItem('authToken');
 
         if (savedUser && savedToken) {
           // Validate token by making a test API call
           try {
             await api.getProducts(); // Test with a protected endpoint
-            const user = JSON.parse(savedUser);
+            const user = normalizeStaffUser(JSON.parse(savedUser));
             setCurrentUser(user);
             // Load data first to get branches, then set branch ID
-            await loadData();
-            // Now set the correct branch ID based on head office status
-            if (user.role === UserRole.SUPER_ADMIN) {
-              const headOfficeBranch = branches.find(b => b.isHeadOffice);
-              setCurrentBranchId(headOfficeBranch ? headOfficeBranch.id : 'HEAD_OFFICE');
-            } else {
-              setCurrentBranchId(user.branchId || 'HEAD_OFFICE');
-            }
+            const loadedBranches = await loadData(user);
+            setCurrentBranchId(resolveBranchContext(user, loadedBranches));
           } catch (error) {
             // Token is invalid, clear session and redirect to login
             console.error('Token validation failed:', error);
-            localStorage.removeItem('user');
-            localStorage.removeItem('authToken');
-            setCurrentUser(null);
-            setCurrentBranchId('HEAD_OFFICE');
+            clearClientSession();
             // Don't redirect here, let the app show login form
           }
         }
       } catch (error) {
         console.error('Failed to restore session:', error);
-        localStorage.removeItem('user');
-        localStorage.removeItem('authToken');
-        setCurrentUser(null);
-        setCurrentBranchId('HEAD_OFFICE');
+        clearClientSession();
       }
     };
 
     checkAuth();
   }, []);
 
+  useEffect(() => {
+    const onAuthExpired = (event: Event) => {
+      const message = (event as CustomEvent<{ message?: string }>)?.detail?.message || 'Session expired. Please login again.';
+      clearClientSession();
+      showWarning('Session Expired', message);
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pms:auth-expired', onAuthExpired as EventListener);
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('pms:auth-expired', onAuthExpired as EventListener);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const enforceAuthGuard = () => {
+      const token = getStoredToken();
+      if (!token || isTokenExpired(token)) {
+        clearClientSession();
+        showWarning('Session Expired', 'Please login to continue.');
+      }
+    };
+
+    enforceAuthGuard();
+    const interval = window.setInterval(enforceAuthGuard, 15000);
+    return () => window.clearInterval(interval);
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+
+    const updateActivity = () => {
+      lastActivityRef.current = Date.now();
+    };
+
+    const decodeJwtExpMs = (token: string): number => {
+      try {
+        const parts = token.split('.');
+        if (parts.length < 2) return 0;
+        const base64Url = parts[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+        const payload = JSON.parse(atob(padded));
+        const exp = Number(payload?.exp || 0);
+        return exp > 0 ? exp * 1000 : 0;
+      } catch {
+        return 0;
+      }
+    };
+
+    const getSessionTimeoutMs = () => {
+      const rawValue = settings.find(s => s.settingKey === 'sessionTimeout')?.settingValue;
+      const minutes = Number(rawValue || 15);
+      return Math.max(1, minutes) * 60 * 1000;
+    };
+
+    const TOKEN_REFRESH_THRESHOLD_MS = 5 * 60 * 1000; // refresh when <= 5 min left
+    const TOKEN_CHECK_INTERVAL_MS = 60 * 1000; // check every 1 minute
+
+    const events = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'];
+    events.forEach((name) => window.addEventListener(name, updateActivity, { passive: true }));
+
+    const interval = window.setInterval(async () => {
+      const now = Date.now();
+      const idleMs = now - lastActivityRef.current;
+      const sessionTimeoutMs = getSessionTimeoutMs();
+      const token = localStorage.getItem('authToken') || sessionStorage.getItem('authToken');
+
+      if (!token) return;
+
+      // End session only when user is idle beyond timeout.
+      if (idleMs >= sessionTimeoutMs) {
+        clearClientSession();
+        showWarning('Session Timeout', 'You were logged out due to inactivity.');
+        return;
+      }
+
+      const expMs = decodeJwtExpMs(token);
+      if (!expMs) return;
+      const remainingMs = expMs - now;
+      if (remainingMs > TOKEN_REFRESH_THRESHOLD_MS || isRefreshingTokenRef.current) return;
+
+      try {
+        isRefreshingTokenRef.current = true;
+        const response = await api.refreshToken();
+        if (response?.token) {
+          if (localStorage.getItem('authToken')) {
+            localStorage.setItem('authToken', response.token);
+          } else if (sessionStorage.getItem('authToken')) {
+            sessionStorage.setItem('authToken', response.token);
+          } else {
+            localStorage.setItem('authToken', response.token);
+          }
+        }
+      } catch (error) {
+        console.error('Token refresh failed:', error);
+      } finally {
+        isRefreshingTokenRef.current = false;
+      }
+    }, TOKEN_CHECK_INTERVAL_MS);
+
+    return () => {
+      events.forEach((name) => window.removeEventListener(name, updateActivity));
+      window.clearInterval(interval);
+    };
+  }, [currentUser, settings]);
+
   // ✅ NEW: Separate function to load data (only call AFTER login)
-  const loadData = async () => {
+  const loadData = async (sessionUser?: StaffType | null): Promise<Branch[]> => {
     setIsLoading(true);
 
     // Add timeout to prevent infinite loading
@@ -155,12 +334,22 @@ const AppContent: React.FC = () => {
       let branchesData: Branch[] = [];
       try {
         branchesData = await api.getBranches();
+        if (branchesData.length === 0 && sessionUser?.branchId) {
+          const fallbackBranch = await api.getBranch(String(sessionUser.branchId));
+          if (fallbackBranch) branchesData = [fallbackBranch];
+        }
         setBranches(branchesData);
       } catch (error) {
         console.error('Failed to load branches:', error);
-        showWarning('Warning', 'Could not load branch data. Some features may be limited.');
-        branchesData = [];
-        setBranches([]);
+        if (sessionUser?.branchId) {
+          const fallbackBranch = await api.getBranch(String(sessionUser.branchId)).catch(() => null);
+          branchesData = fallbackBranch ? [fallbackBranch] : [];
+          setBranches(branchesData);
+        } else {
+          showWarning('Warning', 'Could not load branch data. Some features may be limited.');
+          branchesData = [];
+          setBranches([]);
+        }
       }
 
       // Load inventory data with pricing for all branches
@@ -201,10 +390,12 @@ const AppContent: React.FC = () => {
       }
 
       clearTimeout(timeoutId);
+      return branchesData;
     } catch (error) {
       console.error('Failed to load data:', error);
       showError('Data Load Error', 'Could not load system data from database. Please check your connection.');
       clearTimeout(timeoutId);
+      return [];
     } finally {
       setIsLoading(false);
     }
@@ -294,24 +485,18 @@ const AppContent: React.FC = () => {
 
   // ✅ UPDATED: Handle Login and Load Data
   const handleLogin = async (user: StaffType, token?: string) => {
-    setCurrentUser(user);
+    const normalizedUser = normalizeStaffUser(user);
+    setCurrentUser(normalizedUser);
 
     // Save to localStorage for persistence
-    localStorage.setItem('user', JSON.stringify(user));
+    localStorage.setItem('user', JSON.stringify(normalizedUser));
     if (token) {
       localStorage.setItem('authToken', token); // Save the actual JWT token
     }
 
-    if (user.role === UserRole.SUPER_ADMIN) {
-        // For super admin, check if there's a designated head office branch
-        const headOfficeBranch = branches.find(b => b.isHeadOffice);
-        setCurrentBranchId(headOfficeBranch ? headOfficeBranch.id : 'HEAD_OFFICE');
-    } else {
-        setCurrentBranchId(user.branchId || 'HEAD_OFFICE');
-    }
-
-    // Load data after login
-    await loadData();
+    // Load data after login, then resolve branch using loaded branches.
+    const loadedBranches = await loadData(normalizedUser);
+    setCurrentBranchId(resolveBranchContext(normalizedUser, loadedBranches));
 
     // Set active tab based on role and permissions
     const roleToDefaultTab: Record<UserRole, string> = {
@@ -321,29 +506,15 @@ const AppContent: React.FC = () => {
       [UserRole.DISPENSER]: 'pos',
       [UserRole.STOREKEEPER]: 'inventory',
       [UserRole.INVENTORY_CONTROLLER]: 'inventory',
-      [UserRole.ACCOUNTANT]: 'finance'
+      [UserRole.ACCOUNTANT]: 'finance',
+      [UserRole.AUDITOR]: 'reports'
     };
 
-    setActiveTab(roleToDefaultTab[user.role] || 'dashboard');
+    setActiveTab(roleToDefaultTab[normalizedUser.role] || 'dashboard');
   };
 
   const handleLogout = () => {
-    setCurrentUser(null);
-    setActiveTab('dashboard');
-    setProducts([]);
-    setInventory({});
-    setTransfers([]);
-    setSales([]);
-    setInvoices([]);
-    setExpenses([]);
-    setDisposalRequests([]);
-    setBranches([]);
-    setStaffList([]);
-    setSettings([]);
-
-    // Clear localStorage
-    localStorage.removeItem('user');
-    localStorage.removeItem('authToken');
+    clearClientSession();
   };
 
   // --- PERSISTENCE HANDLERS ---
@@ -385,7 +556,19 @@ const AppContent: React.FC = () => {
       }
   };
 
-  const handleAddStock = async (data: { branchId: string, productId: string, batchNumber: string, expiryDate: string, quantity: number, supplierId?: string, supplierName?: string, restockStatus?: string, lastRestockDate?: string }) => {
+  const handleAddStock = async (data: {
+      branchId: string,
+      productId: string,
+      batchNumber: string,
+      expiryDate: string,
+      quantity: number,
+      supplierId?: string,
+      supplierName?: string,
+      restockStatus?: string,
+      lastRestockDate?: string,
+      costPrice?: number,
+      sellingPrice?: number
+  }) => {
       const previousInventory = inventory;
       
       // Add restock info if not provided
@@ -434,6 +617,31 @@ const AppContent: React.FC = () => {
        } catch (error) {
           console.error('Failed to add stock:', error);
           setInventory(previousInventory);
+          throw error;
+      }
+  };
+
+  const handleAddStockBulk = async (data: {
+      branchId: string,
+      supplierId?: string,
+      supplierName?: string,
+      restockStatus?: string,
+      items: Array<{
+          productId: string,
+          batchNumber: string,
+          expiryDate: string,
+          quantity: number,
+          costPrice?: number,
+          sellingPrice?: number
+      }>
+  }) => {
+      try {
+          await api.addStockBulk(data);
+          const updatedInventory = await api.getInventory(data.branchId);
+          setInventory(prev => ({ ...prev, ...updatedInventory }));
+          showSuccess('Stock Added', `${data.items.length} item(s) restocked successfully.`);
+      } catch (error) {
+          console.error('Failed to add stock in bulk:', error);
           throw error;
       }
   };
@@ -546,12 +754,13 @@ const AppContent: React.FC = () => {
       api.createExpense(exp);
   };
 
-  const handleExpenseAction = async (id: number, action: 'Approved' | 'Rejected') => {
+  const handleExpenseAction = async (id: string | number, action: 'Approved' | 'Rejected') => {
+      const numericId = Number(id);
       const previousExpenses = expenses;
-      setExpenses(prev => prev.map(e => e.id === id ? { ...e, status: action } : e));
+      setExpenses(prev => prev.map(e => e.id === numericId ? { ...e, status: action } : e));
 
       try {
-          await api.updateExpense(String(id), { status: action });
+          await api.updateExpense(String(numericId), { status: action });
           showSuccess('Expense Updated', `Expense has been ${action.toLowerCase()} successfully.`);
       } catch (error) {
           console.error('Failed to update expense:', error);
@@ -655,6 +864,10 @@ const AppContent: React.FC = () => {
 
   // --- ARCHIVE LOGIC ---
   const handleToggleArchive = (type: 'invoice' | 'expense', id: string | number) => {
+      if (currentUser?.role === UserRole.AUDITOR) {
+          showWarning('Read-only Access', 'AUDITOR cannot modify archived records.');
+          return;
+      }
       if (type === 'invoice') {
           const inv = invoices.find(i => i.id === id);
           if (inv) {
@@ -679,6 +892,10 @@ const AppContent: React.FC = () => {
   };
 
   const handleAutoArchive = (months: number) => {
+      if (currentUser?.role === UserRole.AUDITOR) {
+          showWarning('Read-only Access', 'AUDITOR cannot run archive operations.');
+          return;
+      }
       const thresholdDate = new Date();
       thresholdDate.setMonth(thresholdDate.getMonth() - months);
       const thresholdStr = thresholdDate.toISOString().split('T')[0];
@@ -711,8 +928,12 @@ const AppContent: React.FC = () => {
       showSuccess('Auto-Archive Complete', `${count} items have been moved to archive.`);
   };
 
-  // ✅ Show Login if no user
-  if (!currentUser) {
+  const authToken = getStoredToken();
+  const authenticatedUser = currentUser;
+  const hasValidSession = Boolean(authenticatedUser && authToken && !isTokenExpired(authToken));
+
+  // ✅ Show Login if no authenticated session
+  if (!hasValidSession) {
     return <Login onLogin={handleLogin} />;
   }
 
@@ -726,14 +947,18 @@ const AppContent: React.FC = () => {
       )
   }
 
-  const usersBranch = branches.find(b => b.id === currentUser.branchId);
+  if (!authenticatedUser) {
+    return <Login onLogin={handleLogin} />;
+  }
+
+  const usersBranch = findBranchById(branches, authenticatedUser.branchId);
   const branchRequiredRoles = [UserRole.BRANCH_MANAGER, UserRole.ACCOUNTANT, UserRole.PHARMACIST, UserRole.DISPENSER, UserRole.STOREKEEPER, UserRole.INVENTORY_CONTROLLER];
 
-  if (currentUser.role !== UserRole.SUPER_ADMIN && usersBranch?.status === 'INACTIVE') {
+  if (authenticatedUser.role !== UserRole.SUPER_ADMIN && usersBranch?.status === 'INACTIVE') {
     // Branch is inactive
-  } else if (currentUser.role !== UserRole.SUPER_ADMIN && !usersBranch && branchRequiredRoles.includes(currentUser.role)) {
+  } else if (authenticatedUser.role !== UserRole.SUPER_ADMIN && !usersBranch && branchRequiredRoles.includes(authenticatedUser.role)) {
     // For branch-required roles, if branch not found, allow access (perhaps branch was deleted)
-  } else if (currentUser.role !== UserRole.SUPER_ADMIN && !usersBranch) {
+  } else if (authenticatedUser.role !== UserRole.SUPER_ADMIN && !usersBranch) {
     // For other roles, deny if branch not found
       return (
           <div className="h-screen flex flex-col items-center justify-center bg-slate-50 p-4">
@@ -747,7 +972,7 @@ const AppContent: React.FC = () => {
                        <span className="font-bold">{usersBranch ? 'Branch Inactive' : 'Branch Not Found'}</span>
                   </div>
                   <p className="text-slate-500 mb-8">
-                      {usersBranch ? `The branch <strong>${usersBranch.name}</strong> has been deactivated.` : 'Your assigned branch could not be found. Please contact your administrator.'}
+                      Your assigned branch could not be found. Please contact your administrator.
                   </p>
                   <button 
                     onClick={handleLogout} 
@@ -771,10 +996,9 @@ const AppContent: React.FC = () => {
             requisitions={[]}
             onActionRequisition={() => {}}
             disposalRequests={disposalRequests}
-            onApproveDisposal={handleDisposalAction}
+            onApproveDisposal={(req) => handleDisposalAction(req.id, 'APPROVED')}
             expenses={expenses}
             onActionExpense={handleExpenseAction}
-            transfers={transfers}
             onApproveTransfer={() => {}}
           />;
       case 'pos':
@@ -793,6 +1017,7 @@ const AppContent: React.FC = () => {
                 setProducts={setProducts}
                 branches={branches}
                 onAddStock={handleAddStock}
+                onAddStockBulk={handleAddStockBulk}
                 onAddProduct={handleAddProduct}
                 onUpdateProduct={handleUpdateProduct}
                 onCreateTransfer={handleCreateTransfer}
@@ -809,25 +1034,27 @@ const AppContent: React.FC = () => {
                 onCreateExpense={handleCreateExpense}
                 onArchiveItem={(type, id) => handleToggleArchive(type, id)}
                 branches={branches}
+                currentUser={currentUser}
                 settings={settings}
             />
         );
       case 'staff':
         return <Staff currentBranchId={currentBranchId} branches={branches} staffList={staffList} currentUser={currentUser} onAddStaff={handleAddStaff} onUpdateStaff={handleUpdateStaff} />;
       case 'branches':
-        return <Branches branches={branches} onUpdateBranches={setBranches} onAddBranch={handleAddBranch} staff={staffList} currentUser={currentUser} />;
+        return <Branches branches={branches} onUpdateBranches={setBranches} onAddBranch={handleAddBranch} staff={staffList} currentUser={currentUser || undefined} />;
       case 'entities':
         return <Entities mode="management" />;
       case 'clinical':
         return <Clinical currentBranchId={currentBranchId} />;
       case 'reports':
-        return <Reports currentBranchId={currentBranchId} inventory={inventory} sales={sales} expenses={expenses} />;
+        return <Reports currentBranchId={currentBranchId} inventory={inventory} sales={sales} expenses={expenses} currentUser={currentUser} />;
       case 'archive':
         return (
             <Archive 
                 currentBranchId={currentBranchId} 
                 invoices={invoices} 
                 expenses={expenses}
+                currentUser={currentUser}
                 onRestore={(type, id) => handleToggleArchive(type, id)}
                 onAutoArchive={handleAutoArchive}
             />

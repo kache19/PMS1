@@ -46,7 +46,7 @@ function getBranches() {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'AUDITOR']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'AUDITOR', 'DISPENSER', 'PHARMACIST', 'INVENTORY_CONTROLLER', 'STOREKEEPER']);
         $stmt = $pdo->query("
             SELECT b.*, s.name as manager_name
             FROM branches b

@@ -23,23 +23,30 @@ import {
 } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, LineChart, Line, XAxis, YAxis, CartesianGrid } from 'recharts';
 import { api } from '../services/api';
-import { AuditLog, BranchInventoryItem, Sale, Expense, Branch, Product, Invoice, CartItem } from '../types';
+import { AuditLog, BranchInventoryItem, Sale, Expense, Branch, Product, Invoice, CartItem, Staff, UserRole } from '../types';
 import { openCustomPrint } from '../services/printUtils';
 import ReportPrintTemplate from './ReportPrintTemplate';
 import ModernInvoicePrintTemplate from './ModernInvoicePrintTemplate';
+import { runWithPreservedWindowScroll } from '../utils/scrollStability';
 
 const COLORS = ['#0f766e', '#14b8a6', '#f59e0b', '#f43f5e', '#64748b'];
+const formatTZS = (value: number) => `${(Number(value) || 0).toLocaleString()} TZS`;
 
 interface ReportsProps {
   currentBranchId: string;
   inventory: Record<string, BranchInventoryItem[]>;
   sales: Sale[];
   expenses: Expense[];
+  currentUser?: Staff | null;
 }
 
-const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInventory, sales: propSales, expenses: propExpenses }) => {
+const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInventory, sales: propSales, expenses: propExpenses, currentUser }) => {
     const [activeTab, setActiveTab] = useState<'finance' | 'inventory' | 'audit' | 'activity' | 'sales'>('finance');
    const [auditFilter, setAuditFilter] = useState('');
+   const [activitySearch, setActivitySearch] = useState('');
+   const [activityModuleFilter, setActivityModuleFilter] = useState<'ALL' | 'AUTH' | 'SALES' | 'FINANCE' | 'INVENTORY' | 'SHIPMENTS' | 'SYSTEM'>('ALL');
+   const [activitySeverityFilter, setActivitySeverityFilter] = useState<'ALL' | 'INFO' | 'WARNING' | 'CRITICAL'>('ALL');
+   const [activityWindowHours, setActivityWindowHours] = useState<24 | 72 | 168>(24);
    const [branches, setBranches] = useState<Branch[]>([]);
    const [products, setProducts] = useState<Product[]>([]);
    const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
@@ -78,7 +85,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
           api.getBranches(),
           api.getProducts(),
           api.getAuditLogs(),
-          api.getSessions(),
+          api.getLoginTrackers({ days: 7 }),
           api.getSales(),
           api.getInventory(),
           api.getExpenses(),
@@ -111,7 +118,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
           ).length;
 
           setRealTimeData({
-            activeUsers: sessions.length,
+            activeUsers: (sessionsData || []).filter((s: any) => String(s.status || '').toLowerCase() === 'active').length,
             pendingApprovals,
             systemAlerts,
             recentTransactions: recentLogs.filter(log =>
@@ -144,7 +151,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
     // Set up real-time updates every 30 seconds
     const interval = setInterval(() => {
       if (mounted) {
-        loadData();
+        void runWithPreservedWindowScroll(() => loadData());
       }
     }, 30000);
 
@@ -156,18 +163,20 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
 
   const currentBranch = branches.find(b => b.id === currentBranchId);
   const isHeadOffice = currentBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';
+  const isAuditor = currentUser?.role === UserRole.AUDITOR;
   const branchName = currentBranch?.name || 'All Branches';
+  const isGlobalScope = isHeadOffice || isAuditor;
 
   // Dynamic filtering
   const filteredSales = useMemo(
-    () => isHeadOffice ? sales : sales.filter(s => s.branchId === currentBranchId),
-    [sales, currentBranchId, isHeadOffice]
+    () => (isHeadOffice || isAuditor) ? sales : sales.filter(s => s.branchId === currentBranchId),
+    [sales, currentBranchId, isHeadOffice, isAuditor]
   );
 
   // Filter invoices by branch
   const filteredInvoices = useMemo(
-    () => isHeadOffice ? invoices : invoices.filter(inv => inv.branchId === currentBranchId),
-    [invoices, currentBranchId, isHeadOffice]
+    () => (isHeadOffice || isAuditor) ? invoices : invoices.filter(inv => inv.branchId === currentBranchId),
+    [invoices, currentBranchId, isHeadOffice, isAuditor]
   );
 
   // Filtered and sorted sales for report
@@ -212,8 +221,8 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
   }, [filteredSales, salesStartDate, salesEndDate, salesSortBy, salesSortOrder]);
 
   const filteredExpenses = useMemo(
-    () => isHeadOffice ? expenses : expenses.filter(e => e.branchId === currentBranchId),
-    [expenses, currentBranchId, isHeadOffice]
+    () => (isHeadOffice || isAuditor) ? expenses : expenses.filter(e => e.branchId === currentBranchId),
+    [expenses, currentBranchId, isHeadOffice, isAuditor]
   );
 
   // Calculate Advanced Finance Stats
@@ -385,38 +394,187 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
   // Filter Audit Logs
   const filteredAuditLogs = useMemo(() => {
     return auditLogs.filter(log => {
-      const matchBranch = isHeadOffice ? true : log.branchId === currentBranchId;
+      const matchBranch = isGlobalScope ? true : log.branchId === currentBranchId;
       const matchSearch = log.details?.toLowerCase().includes(auditFilter.toLowerCase()) ||
         log.action?.toLowerCase().includes(auditFilter.toLowerCase()) ||
         log.userName?.toLowerCase().includes(auditFilter.toLowerCase());
       return matchBranch && matchSearch;
     });
-  }, [auditLogs, auditFilter, currentBranchId, isHeadOffice]);
+  }, [auditLogs, auditFilter, currentBranchId, isGlobalScope]);
 
-  // Real-time Activity Feed
-  const activityFeed = useMemo(() => {
-    const recentLogs = auditLogs
-      .filter(log => {
-        const logTime = new Date(log.timestamp || '').getTime();
-        return Date.now() - logTime < 24 * 60 * 60 * 1000; // Last 24 hours
-      })
-      .sort((a, b) => new Date(b.timestamp || '').getTime() - new Date(a.timestamp || '').getTime())
-      .slice(0, 10);
+  const systemActivities = useMemo(() => {
+    const activities: Array<{
+      id: string;
+      source: 'AUDIT' | 'AUTH' | 'SALE' | 'INVOICE' | 'EXPENSE';
+      module: 'AUTH' | 'SALES' | 'FINANCE' | 'INVENTORY' | 'SHIPMENTS' | 'SYSTEM';
+      type: 'create' | 'update' | 'delete' | 'approve' | 'info';
+      title: string;
+      description: string;
+      user: string;
+      userId?: string;
+      branchId?: string;
+      branch: string;
+      severity: 'INFO' | 'WARNING' | 'CRITICAL';
+      timestamp: string;
+    }> = [];
 
-    return recentLogs.map(log => ({
-      id: log.id,
-      type: log.action?.includes('CREATE') ? 'create' :
-            log.action?.includes('UPDATE') ? 'update' :
-            log.action?.includes('DELETE') ? 'delete' :
-            log.action?.includes('APPROVE') ? 'approve' : 'info',
-      title: log.action?.replace(/_/g, ' ') || 'Activity',
-      description: log.details || '',
-      user: log.userName || 'System',
-      timestamp: log.timestamp || '',
-      branch: branches.find(b => b.id === log.branchId)?.name || log.branchId,
-      severity: log.severity
-    }));
-  }, [auditLogs, branches]);
+    auditLogs.forEach((log) => {
+      const action = String(log.action || '').toUpperCase();
+      let module: 'AUTH' | 'SALES' | 'FINANCE' | 'INVENTORY' | 'SHIPMENTS' | 'SYSTEM' = 'SYSTEM';
+      if (action.includes('LOGIN') || action.includes('LOGOUT') || action.includes('AUTH')) module = 'AUTH';
+      else if (action.includes('SALE') || action.includes('PAYMENT')) module = 'SALES';
+      else if (action.includes('INVOICE') || action.includes('EXPENSE') || action.includes('FINANCE')) module = 'FINANCE';
+      else if (action.includes('INVENTORY') || action.includes('PRODUCT') || action.includes('STOCK')) module = 'INVENTORY';
+      else if (action.includes('SHIPMENT') || action.includes('TRANSFER') || action.includes('REQUISITION')) module = 'SHIPMENTS';
+
+      activities.push({
+        id: `AUD-${log.id ?? Math.random().toString(36).slice(2)}`,
+        source: 'AUDIT',
+        module,
+        type: action.includes('CREATE') ? 'create'
+          : action.includes('UPDATE') ? 'update'
+          : action.includes('DELETE') ? 'delete'
+          : action.includes('APPROVE') ? 'approve'
+          : 'info',
+        title: log.action?.replace(/_/g, ' ') || 'Audit Activity',
+        description: log.details || `${module} activity recorded`,
+        user: log.userName || 'System',
+        userId: log.userId,
+        branchId: log.branchId,
+        branch: branches.find(b => b.id === log.branchId)?.name || log.branchId || 'Global',
+        severity: (log.severity || 'INFO') as 'INFO' | 'WARNING' | 'CRITICAL',
+        timestamp: log.timestamp || ''
+      });
+    });
+
+    sessions.forEach((session: any, idx: number) => {
+      const loginTime = session.loginTime || session.login_time || '';
+      const logoutTime = session.logoutTime || session.logout_time || '';
+      const branchId = session.branchId || session.branch_id || '';
+      const branchNameResolved = branches.find(b => b.id === branchId)?.name || session.branchName || branchId || 'Global';
+
+      if (loginTime) {
+        activities.push({
+          id: `AUTH-L-${session.id || idx}`,
+          source: 'AUTH',
+          module: 'AUTH',
+          type: 'info',
+          title: 'User Login',
+          description: `${session.userName || 'User'} signed in (${session.deviceInfo || 'Unknown device'})`,
+          user: session.userName || 'Unknown',
+          userId: session.userId,
+          branchId,
+          branch: branchNameResolved,
+          severity: 'INFO',
+          timestamp: loginTime
+        });
+      }
+      if (logoutTime) {
+        activities.push({
+          id: `AUTH-O-${session.id || idx}`,
+          source: 'AUTH',
+          module: 'AUTH',
+          type: 'info',
+          title: 'User Logout',
+          description: `${session.userName || 'User'} signed out`,
+          user: session.userName || 'Unknown',
+          userId: session.userId,
+          branchId,
+          branch: branchNameResolved,
+          severity: 'INFO',
+          timestamp: logoutTime
+        });
+      }
+    });
+
+    sales.forEach((sale) => {
+      activities.push({
+        id: `SALE-${sale.id}`,
+        source: 'SALE',
+        module: 'SALES',
+        type: 'create',
+        title: 'Sale Completed',
+        description: `${(sale.totalAmount || 0).toLocaleString()} TZS via ${sale.paymentMethod}`,
+        user: 'System',
+        branchId: sale.branchId,
+        branch: branches.find(b => b.id === sale.branchId)?.name || sale.branchId || 'Global',
+        severity: 'INFO',
+        timestamp: sale.date
+      });
+    });
+
+    invoices.forEach((invoice) => {
+      activities.push({
+        id: `INV-${invoice.id}`,
+        source: 'INVOICE',
+        module: 'FINANCE',
+        type: 'create',
+        title: 'Invoice Recorded',
+        description: `${invoice.id} - ${(invoice.totalAmount || 0).toLocaleString()} TZS - ${invoice.status}`,
+        user: 'System',
+        branchId: invoice.branchId,
+        branch: branches.find(b => b.id === invoice.branchId)?.name || invoice.branchId || 'Global',
+        severity: invoice.status === 'OVERDUE' ? 'WARNING' : 'INFO',
+        timestamp: invoice.dateIssued
+      });
+    });
+
+    expenses.forEach((expense) => {
+      activities.push({
+        id: `EXP-${expense.id}`,
+        source: 'EXPENSE',
+        module: 'FINANCE',
+        type: expense.status === 'Pending' ? 'info' : 'approve',
+        title: `Expense ${expense.status}`,
+        description: `${expense.category}: ${(expense.amount || 0).toLocaleString()} TZS`,
+        user: 'System',
+        branchId: expense.branchId,
+        branch: branches.find(b => b.id === expense.branchId)?.name || expense.branchId || 'Global',
+        severity: expense.status === 'Rejected' ? 'WARNING' : 'INFO',
+        timestamp: expense.date
+      });
+    });
+
+    return activities
+      .filter((activity) => Boolean(activity.timestamp))
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }, [auditLogs, sessions, sales, invoices, expenses, branches]);
+
+  const filteredSystemActivities = useMemo(() => {
+    const windowMs = activityWindowHours * 60 * 60 * 1000;
+    const cutoff = Date.now() - windowMs;
+    const query = activitySearch.trim().toLowerCase();
+
+    return systemActivities.filter((activity) => {
+      const timeMs = new Date(activity.timestamp).getTime();
+      const matchTime = Number.isFinite(timeMs) && timeMs >= cutoff;
+      const matchBranch = isGlobalScope ? true : activity.branchId === currentBranchId;
+      const matchModule = activityModuleFilter === 'ALL' ? true : activity.module === activityModuleFilter;
+      const matchSeverity = activitySeverityFilter === 'ALL' ? true : activity.severity === activitySeverityFilter;
+      const haystack = `${activity.title} ${activity.description} ${activity.user} ${activity.branch} ${activity.module}`.toLowerCase();
+      const matchSearch = query === '' ? true : haystack.includes(query);
+      return matchTime && matchBranch && matchModule && matchSeverity && matchSearch;
+    });
+  }, [systemActivities, activityWindowHours, isGlobalScope, currentBranchId, activityModuleFilter, activitySeverityFilter, activitySearch]);
+
+  const activityMetrics = useMemo(() => {
+    const byModule = filteredSystemActivities.reduce((acc, activity) => {
+      acc[activity.module] = (acc[activity.module] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+
+    const critical = filteredSystemActivities.filter(a => a.severity === 'CRITICAL').length;
+    const warnings = filteredSystemActivities.filter(a => a.severity === 'WARNING').length;
+    const uniqueUsers = new Set(filteredSystemActivities.map(a => a.userId || a.user).filter(Boolean)).size;
+
+    return {
+      total: filteredSystemActivities.length,
+      critical,
+      warnings,
+      uniqueUsers,
+      byModule
+    };
+  }, [filteredSystemActivities]);
 
   // Sales by Category Data
   const categorySales = useMemo(() => {
@@ -425,7 +583,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
     const categoryMap: Record<string, number> = {};
     filteredSales.forEach(sale => {
       sale.items.forEach(item => {
-        const product = products.find(p => p.id === item.productId);
+        const product = products.find(p => p.id === (item.productId || item.id));
         if (product) {
           const category = product.category;
           categoryMap[category] = (categoryMap[category] || 0) + (item.price * item.quantity);
@@ -551,7 +709,8 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
       client: {
         name: customerInfo.name,
         address: customerInfo.address,
-        email: customerInfo.email
+        email: customerInfo.email,
+        phone: customerInfo.phone
       },
       items: (invoice.items || []).map((item: CartItem) => ({
         description: item.name || item.productName || 'Item',
@@ -726,7 +885,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h2 className="text-3xl font-bold text-slate-900">Reports & Analytics</h2>
+          <h2 className="text-2xl md:text-3xl font-bold text-slate-900">Reports & Analytics</h2>
           <p className="text-slate-500 mt-1">
             {isHeadOffice ? 'Global Intelligence Hub' : `Performance Reports for ${branchName}`}
           </p>
@@ -756,7 +915,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
       )}
 
       {/* Tabs */}
-      <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-fit no-print">
+      <div className="flex gap-1 bg-slate-100 p-1 rounded-xl no-print w-full overflow-x-auto whitespace-nowrap">
         <button
           onClick={() => setActiveTab('finance')}
           className={`px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${activeTab === 'finance' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
@@ -796,44 +955,41 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
         {activeTab === 'finance' && (
           <div className="space-y-6">
             {/* Advanced Financial Summary Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Total Revenue</p>
-                <h3 className="text-2xl md:text-3xl font-bold text-slate-800 truncate">
-                  {(financeStats.revenue / 1000000).toFixed(1)}M
-                  <span className="text-sm text-slate-400 font-normal"> TZS</span>
+                <h3 className="text-base sm:text-xl xl:text-2xl font-bold text-slate-800 break-words leading-tight">
+                  {formatTZS(financeStats.revenue)}
                 </h3>
                 <div className="mt-2 text-xs text-emerald-600 font-bold bg-emerald-50 inline-block px-2 py-1 rounded">
                   {financeStats.totalTransactions} transactions
                 </div>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Net Profit</p>
-                <h3 className="text-2xl md:text-3xl font-bold text-slate-800 truncate">
-                  {(financeStats.netProfit / 1000000).toFixed(1)}M
-                  <span className="text-sm text-slate-400 font-normal"> TZS</span>
+                <h3 className="text-base sm:text-xl xl:text-2xl font-bold text-slate-800 break-words leading-tight">
+                  {formatTZS(financeStats.netProfit)}
                 </h3>
                 <div className="mt-2 text-xs text-blue-600 font-bold bg-blue-50 inline-block px-2 py-1 rounded">
                   Net Margin: {financeStats.netMargin.toFixed(1)}%
                 </div>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Gross Margin</p>
-                <h3 className="text-2xl md:text-3xl font-bold text-slate-800 truncate">
+                <h3 className="text-base sm:text-xl xl:text-2xl font-bold text-slate-800 leading-tight">
                   {financeStats.grossMargin.toFixed(1)}%
                 </h3>
                 <div className="mt-2 text-xs text-emerald-600 font-bold bg-emerald-50 inline-block px-2 py-1 rounded">
-                  Avg Transaction: {(financeStats.averageTransaction / 1000).toFixed(0)}K TZS
+                  Avg Transaction: {formatTZS(Math.round(financeStats.averageTransaction))}
                 </div>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Op. Expenses</p>
-                <h3 className="text-2xl md:text-3xl font-bold text-slate-800 truncate">
-                  {(financeStats.expenses / 1000000).toFixed(1)}M
-                  <span className="text-sm text-slate-400 font-normal"> TZS</span>
+                <h3 className="text-base sm:text-xl xl:text-2xl font-bold text-slate-800 break-words leading-tight">
+                  {formatTZS(financeStats.expenses)}
                 </h3>
                 <div className="mt-2 text-xs text-rose-600 font-bold bg-rose-50 inline-block px-2 py-1 rounded">
                   {financeStats.expenseRatio.toFixed(1)}% of revenue
@@ -844,11 +1000,11 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
             {/* Expense Breakdown */}
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 break-inside-avoid">
               <h4 className="font-bold text-slate-800 mb-4">Expense Breakdown by Category</h4>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4">
                 {Object.entries(financeStats.expenseByCategory).map(([category, amount]) => (
-                  <div key={category} className="flex justify-between items-center p-3 bg-slate-50 rounded-lg">
-                    <span className="text-sm font-medium text-slate-700">{category}</span>
-                    <span className="text-sm font-bold text-slate-800">{((amount as number) / 1000).toFixed(0)}K TZS</span>
+                  <div key={category} className="flex justify-between items-center gap-3 p-3 bg-slate-50 rounded-lg">
+                    <span className="text-sm font-medium text-slate-700 break-words">{category}</span>
+                    <span className="text-sm font-bold text-slate-800 text-right">{formatTZS(amount as number)}</span>
                   </div>
                 ))}
               </div>
@@ -899,7 +1055,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
                   </ResponsiveContainer>
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                     <div className="text-center">
-                      <span className="text-2xl font-bold text-teal-800">{categorySales.length}</span>
+                      <span className="text-xl font-bold text-teal-800">{categorySales.length}</span>
                       <p className="text-xs text-slate-500 uppercase">Categories</p>
                     </div>
                   </div>
@@ -911,7 +1067,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
                         <div className="w-3 h-3 rounded-full mr-2" style={{ backgroundColor: COLORS[index % COLORS.length] }}></div>
                         <span className="text-slate-600">{category.name}</span>
                       </div>
-                      <span className="font-medium text-slate-900">{(category.value / 1000000).toFixed(1)}M TZS</span>
+                      <span className="font-medium text-slate-900">{formatTZS(category.value)}</span>
                     </div>
                   ))}
                 </div>
@@ -972,32 +1128,30 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
         {activeTab === 'inventory' && (
           <div className="space-y-6">
             {/* Inventory Overview Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Total Stock Value</p>
-                <h3 className="text-2xl md:text-3xl font-bold text-slate-800 truncate">
-                  {(inventoryAnalytics.totalValuation / 1000000).toFixed(1)}M
-                  <span className="text-sm text-slate-400 font-normal"> TZS</span>
+                <h3 className="text-base sm:text-xl xl:text-2xl font-bold text-slate-800 break-words leading-tight">
+                  {formatTZS(inventoryAnalytics.totalValuation)}
                 </h3>
                 <div className="mt-2 text-xs text-emerald-600 font-bold bg-emerald-50 inline-block px-2 py-1 rounded">
                   {inventoryAnalytics.totalStock} units total
                 </div>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Stock Efficiency</p>
-                <h3 className="text-3xl font-bold text-slate-800">
-                  {(inventoryAnalytics.stockEfficiency / 1000).toFixed(0)}K
-                  <span className="text-sm text-slate-400 font-normal"> TZS/unit</span>
+                <h3 className="text-base sm:text-xl xl:text-2xl font-bold text-slate-800 break-words leading-tight">
+                  {`${Math.round(inventoryAnalytics.stockEfficiency).toLocaleString()} TZS/unit`}
                 </h3>
                 <div className="mt-2 text-xs text-blue-600 font-bold bg-blue-50 inline-block px-2 py-1 rounded">
                   Avg cost per unit
                 </div>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Low Stock Alerts</p>
-                <h3 className="text-3xl font-bold text-slate-800">
+                <h3 className="text-xl sm:text-2xl font-bold text-slate-800 leading-tight">
                   {inventoryAnalytics.lowStockItems}
                 </h3>
                 <div className="mt-2 text-xs text-amber-600 font-bold bg-amber-50 inline-block px-2 py-1 rounded">
@@ -1005,9 +1159,9 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
                 </div>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Out of Stock</p>
-                <h3 className="text-3xl font-bold text-slate-800">
+                <h3 className="text-xl sm:text-2xl font-bold text-slate-800 leading-tight">
                   {inventoryAnalytics.outOfStockItems}
                 </h3>
                 <div className="mt-2 text-xs text-rose-600 font-bold bg-rose-50 inline-block px-2 py-1 rounded">
@@ -1040,7 +1194,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
                         </div>
                       </div>
                       <div className="text-right">
-                        <p className="text-sm font-bold text-slate-800">{(item.value / 1000).toFixed(0)}K TZS</p>
+                        <p className="text-sm font-bold text-slate-800">{formatTZS(item.value)}</p>
                         <p className="text-xs text-slate-500">{item.cumulativePercent.toFixed(1)}% cumulative</p>
                       </div>
                     </div>
@@ -1056,17 +1210,17 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
                 <div className="space-y-4">
                   <div className="grid grid-cols-3 gap-4">
                     <div className="text-center p-3 bg-green-50 rounded-lg border border-green-200">
-                      <p className="text-2xl font-bold text-green-700">{inventoryAnalytics.turnoverAnalysis.fastMoving}</p>
+                      <p className="text-xl font-bold text-green-700">{inventoryAnalytics.turnoverAnalysis.fastMoving}</p>
                       <p className="text-xs text-green-600">Fast Moving</p>
                       <p className="text-xs text-slate-500">6 turns/year</p>
                     </div>
                     <div className="text-center p-3 bg-blue-50 rounded-lg border border-blue-200">
-                      <p className="text-2xl font-bold text-blue-700">{inventoryAnalytics.productAnalytics.length - inventoryAnalytics.turnoverAnalysis.fastMoving - inventoryAnalytics.turnoverAnalysis.slowMoving}</p>
+                      <p className="text-xl font-bold text-blue-700">{inventoryAnalytics.productAnalytics.length - inventoryAnalytics.turnoverAnalysis.fastMoving - inventoryAnalytics.turnoverAnalysis.slowMoving}</p>
                       <p className="text-xs text-blue-600">Normal</p>
                       <p className="text-xs text-slate-500">2-6 turns/year</p>
                     </div>
                     <div className="text-center p-3 bg-red-50 rounded-lg border border-red-200">
-                      <p className="text-2xl font-bold text-red-700">{inventoryAnalytics.turnoverAnalysis.slowMoving}</p>
+                      <p className="text-xl font-bold text-red-700">{inventoryAnalytics.turnoverAnalysis.slowMoving}</p>
                       <p className="text-xs text-red-600">Slow Moving</p>
                       <p className="text-xs text-slate-500">2 turns/year</p>
                     </div>
@@ -1074,7 +1228,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
                   <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
                     <div className="flex justify-between items-center">
                       <span className="text-sm text-slate-600">Average Turnover Rate</span>
-                      <span className="text-lg font-bold text-slate-800">{inventoryAnalytics.turnoverAnalysis.averageTurnover.toFixed(1)} turns/year</span>
+                      <span className="text-base sm:text-lg font-bold text-slate-800">{inventoryAnalytics.turnoverAnalysis.averageTurnover.toFixed(1)} turns/year</span>
                     </div>
                   </div>
                 </div>
@@ -1102,7 +1256,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
                         <td className="px-4 py-3 font-medium text-slate-800">{item.name}</td>
                         <td className="px-4 py-3 text-slate-600">{item.category}</td>
                         <td className="px-4 py-3 text-center font-bold text-slate-700">{item.quantity}</td>
-                        <td className="px-4 py-3 text-center font-bold text-slate-700">{(item.value / 1000).toFixed(0)}K TZS</td>
+                        <td className="px-4 py-3 text-center font-bold text-slate-700">{formatTZS(item.value)}</td>
                         <td className="px-4 py-3 text-center">
                           <span className={`px-2 py-1 rounded text-xs font-bold ${
                             item.margin > 50 ? 'bg-green-100 text-green-700' :
@@ -1133,66 +1287,114 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
         {/* ACTIVITY TAB */}
         {activeTab === 'activity' && (
           <div className="space-y-6">
-            {/* Real-time Status Cards */}
+            {/* Activity Summary Cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-slate-500 mb-1">Active Users</p>
-                    <h3 className="text-3xl font-bold text-slate-800">{realTimeData.activeUsers}</h3>
+                    <p className="text-sm font-medium text-slate-500 mb-1">Total Activities</p>
+                    <h3 className="text-2xl font-bold text-slate-800">{activityMetrics.total}</h3>
                   </div>
-                  <div className="h-12 w-12 bg-green-100 rounded-full flex items-center justify-center">
-                    <Activity size={24} className="text-green-600" />
-                  </div>
-                </div>
-                <div className="mt-2 text-xs text-green-600 font-bold bg-green-50 inline-block px-2 py-1 rounded">
-                  Live • {lastUpdate.toLocaleTimeString()}
-                </div>
-              </div>
-
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-slate-500 mb-1">Pending Approvals</p>
-                    <h3 className="text-3xl font-bold text-slate-800">{realTimeData.pendingApprovals}</h3>
-                  </div>
-                  <div className="h-12 w-12 bg-amber-100 rounded-full flex items-center justify-center">
-                    <AlertTriangle size={24} className="text-amber-600" />
+                  <div className="h-12 w-12 bg-teal-100 rounded-full flex items-center justify-center">
+                    <Activity size={24} className="text-teal-600" />
                   </div>
                 </div>
-                <div className="mt-2 text-xs text-amber-600 font-bold bg-amber-50 inline-block px-2 py-1 rounded">
-                  Requires Attention
+                <div className="mt-2 text-xs text-teal-700 font-bold bg-teal-50 inline-block px-2 py-1 rounded">
+                  Last {activityWindowHours}h
                 </div>
               </div>
 
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-slate-500 mb-1">System Alerts</p>
-                    <h3 className="text-3xl font-bold text-slate-800">{realTimeData.systemAlerts}</h3>
+                    <p className="text-sm font-medium text-slate-500 mb-1">Critical Alerts</p>
+                    <h3 className="text-2xl font-bold text-slate-800">{activityMetrics.critical}</h3>
                   </div>
                   <div className="h-12 w-12 bg-red-100 rounded-full flex items-center justify-center">
                     <ShieldAlert size={24} className="text-red-600" />
                   </div>
                 </div>
-                <div className="mt-2 text-xs text-red-600 font-bold bg-red-50 inline-block px-2 py-1 rounded">
-                  Last 24h
+                <div className="mt-2 text-xs text-red-700 font-bold bg-red-50 inline-block px-2 py-1 rounded">
+                  Requires immediate review
                 </div>
               </div>
 
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-slate-500 mb-1">Recent Transactions</p>
-                    <h3 className="text-3xl font-bold text-slate-800">{realTimeData.recentTransactions}</h3>
+                    <p className="text-sm font-medium text-slate-500 mb-1">Warnings</p>
+                    <h3 className="text-2xl font-bold text-slate-800">{activityMetrics.warnings}</h3>
+                  </div>
+                  <div className="h-12 w-12 bg-amber-100 rounded-full flex items-center justify-center">
+                    <AlertTriangle size={24} className="text-amber-600" />
+                  </div>
+                </div>
+                <div className="mt-2 text-xs text-amber-700 font-bold bg-amber-50 inline-block px-2 py-1 rounded">
+                  Last {activityWindowHours}h
+                </div>
+              </div>
+
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-slate-500 mb-1">Unique Users</p>
+                    <h3 className="text-2xl font-bold text-slate-800">{activityMetrics.uniqueUsers}</h3>
                   </div>
                   <div className="h-12 w-12 bg-blue-100 rounded-full flex items-center justify-center">
-                    <TrendingUp size={24} className="text-blue-600" />
+                    <User size={24} className="text-blue-600" />
                   </div>
                 </div>
-                <div className="mt-2 text-xs text-blue-600 font-bold bg-blue-50 inline-block px-2 py-1 rounded">
-                  Today
+                <div className="mt-2 text-xs text-blue-700 font-bold bg-blue-50 inline-block px-2 py-1 rounded">
+                  Across current scope
                 </div>
+              </div>
+            </div>
+
+            {/* Filters */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="relative">
+                  <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={activitySearch}
+                    onChange={(e) => setActivitySearch(e.target.value)}
+                    placeholder="Search activities..."
+                    className="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 text-sm"
+                  />
+                </div>
+                <select
+                  value={activityWindowHours}
+                  onChange={(e) => setActivityWindowHours(Number(e.target.value) as 24 | 72 | 168)}
+                  className="px-3 py-2 rounded-lg border border-slate-200 text-sm"
+                >
+                  <option value={24}>Last 24 hours</option>
+                  <option value={72}>Last 3 days</option>
+                  <option value={168}>Last 7 days</option>
+                </select>
+                <select
+                  value={activityModuleFilter}
+                  onChange={(e) => setActivityModuleFilter(e.target.value as 'ALL' | 'AUTH' | 'SALES' | 'FINANCE' | 'INVENTORY' | 'SHIPMENTS' | 'SYSTEM')}
+                  className="px-3 py-2 rounded-lg border border-slate-200 text-sm"
+                >
+                  <option value="ALL">All Modules</option>
+                  <option value="AUTH">Authentication</option>
+                  <option value="SALES">Sales</option>
+                  <option value="FINANCE">Finance</option>
+                  <option value="INVENTORY">Inventory</option>
+                  <option value="SHIPMENTS">Shipments</option>
+                  <option value="SYSTEM">System</option>
+                </select>
+                <select
+                  value={activitySeverityFilter}
+                  onChange={(e) => setActivitySeverityFilter(e.target.value as 'ALL' | 'INFO' | 'WARNING' | 'CRITICAL')}
+                  className="px-3 py-2 rounded-lg border border-slate-200 text-sm"
+                >
+                  <option value="ALL">All Severity</option>
+                  <option value="INFO">Info</option>
+                  <option value="WARNING">Warning</option>
+                  <option value="CRITICAL">Critical</option>
+                </select>
               </div>
             </div>
 
@@ -1200,34 +1402,43 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
             <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
               <div className="p-6 border-b border-slate-100">
                 <div className="flex items-center justify-between">
-                  <h4 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                  <h4 className="text-base sm:text-lg font-bold text-slate-800 flex items-center gap-2">
                     <Activity size={20} className="text-teal-600" />
-                    Live Activity Feed
+                    System Activity Feed
                   </h4>
                   <div className="flex items-center gap-2 text-sm text-slate-500">
                     <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                    Live Updates
+                    Live updates
                   </div>
                 </div>
-                <p className="text-sm text-slate-500 mt-1">Real-time system activity from the last 24 hours</p>
+                <p className="text-sm text-slate-500 mt-1">
+                  {isGlobalScope ? 'Cross-branch activity visibility enabled' : `Showing branch-only activity for ${branchName}`}
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {Object.entries(activityMetrics.byModule).map(([module, count]) => (
+                    <span key={module} className="px-2 py-1 rounded text-xs font-semibold bg-slate-100 text-slate-700">
+                      {module}: {count}
+                    </span>
+                  ))}
+                </div>
               </div>
 
               <div className="max-h-96 overflow-y-auto">
-                {activityFeed.length === 0 ? (
+                {filteredSystemActivities.length === 0 ? (
                   <div className="p-8 text-center text-slate-400">
                     <Activity size={48} className="mx-auto mb-4 opacity-50" />
-                    <p>No recent activity</p>
+                    <p>No activity found for current filters</p>
                   </div>
                 ) : (
                   <div className="divide-y divide-slate-100">
-                    {activityFeed.map((activity, index) => (
+                    {filteredSystemActivities.map((activity, index) => (
                       <div key={activity.id || index} className="p-4 hover:bg-slate-50 transition-colors">
                         <div className="flex items-start gap-4">
                           <div className={`p-2 rounded-lg flex-shrink-0 ${
                             activity.type === 'create' ? 'bg-green-100 text-green-600' :
                             activity.type === 'update' ? 'bg-blue-100 text-blue-600' :
                             activity.type === 'delete' ? 'bg-red-100 text-red-600' :
-                            activity.type === 'approve' ? 'bg-purple-100 text-purple-600' :
+                            activity.type === 'approve' ? 'bg-teal-100 text-teal-700' :
                             'bg-slate-100 text-slate-600'
                           }`}>
                             {activity.type === 'create' && <Plus size={16} />}
@@ -1250,6 +1461,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
                             </div>
                             <p className="text-sm text-slate-600 mb-2">{activity.description}</p>
                             <div className="flex items-center gap-4 text-xs text-slate-500">
+                              <span className="font-semibold text-slate-600">{activity.module}</span>
                               <span className="flex items-center gap-1">
                                 <User size={12} />
                                 {activity.user}
@@ -1289,7 +1501,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
           <div className="space-y-6">
             {/* Sales Report Header */}
             <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
-              <h3 className="text-lg font-bold text-slate-800">Sales Report</h3>
+              <h3 className="text-base sm:text-lg font-bold text-slate-800">Sales Report</h3>
               <div className="flex flex-col sm:flex-row gap-3">
                 {/* Date Filters */}
                 <div className="flex gap-2">
@@ -1334,22 +1546,22 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
             </div>
 
             {/* Sales Summary */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Total Sales</p>
-                <h3 className="text-2xl font-bold text-slate-800">{reportSales.length}</h3>
+                <h3 className="text-xl sm:text-2xl font-bold text-slate-800">{reportSales.length}</h3>
               </div>
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Total Revenue</p>
-                <h3 className="text-2xl font-bold text-slate-800">{reportSales.reduce((sum, s) => sum + s.totalAmount, 0).toLocaleString()} TZS</h3>
+                <h3 className="text-base sm:text-xl font-bold text-slate-800 break-words leading-tight">{formatTZS(reportSales.reduce((sum, s) => sum + s.totalAmount, 0))}</h3>
               </div>
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Total Profit</p>
-                <h3 className="text-2xl font-bold text-slate-800">{reportSales.reduce((sum, s) => sum + s.profit, 0).toLocaleString()} TZS</h3>
+                <h3 className="text-base sm:text-xl font-bold text-slate-800 break-words leading-tight">{formatTZS(reportSales.reduce((sum, s) => sum + s.profit, 0))}</h3>
               </div>
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+              <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 min-w-0">
                 <p className="text-sm font-medium text-slate-500 mb-1">Avg Sale</p>
-                <h3 className="text-2xl font-bold text-slate-800">{reportSales.length > 0 ? (reportSales.reduce((sum, s) => sum + s.totalAmount, 0) / reportSales.length).toFixed(0) : 0} TZS</h3>
+                <h3 className="text-base sm:text-xl font-bold text-slate-800 break-words leading-tight">{formatTZS(reportSales.length > 0 ? Math.round(reportSales.reduce((sum, s) => sum + s.totalAmount, 0) / reportSales.length) : 0)}</h3>
               </div>
             </div>
 
@@ -1451,7 +1663,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
                     filteredAuditLogs.map((log) => (
                       <tr key={log.id} className="hover:bg-slate-50">
                         <td className="px-6 py-4 text-slate-500 font-mono text-xs">
-                          {new Date(log.timestamp).toLocaleString()}
+                          {log.timestamp ? new Date(log.timestamp).toLocaleString() : 'N/A'}
                         </td>
                         <td className="px-6 py-4 font-medium text-slate-800">
                           {log.userName}
@@ -1495,7 +1707,7 @@ const Reports: React.FC<ReportsProps> = ({ currentBranchId, inventory: propInven
           <div className="bg-white rounded-lg w-full max-w-full sm:max-w-md md:max-w-2xl lg:max-w-2xl max-h-[90vh] overflow-y-auto m-2 md:m-4">
             <div className="p-6 border-b border-slate-100">
               <div className="flex justify-between items-center">
-                <h3 className="text-xl font-bold text-slate-900">Sale Details - {selectedSale.id}</h3>
+                <h3 className="text-lg font-bold text-slate-900">Sale Details - {selectedSale.id}</h3>
                 <button
                   onClick={() => setShowSalesPreview(false)}
                   className="text-slate-400 hover:text-slate-600"

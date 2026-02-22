@@ -19,6 +19,7 @@ import {
   UserPlus
 } from 'lucide-react';
 import { Staff, UserRole, Branch } from '../types';
+import { branchIdsMatch, getBranchDisplayName } from '../utils/branchDisplay';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -52,7 +53,7 @@ const Layout: React.FC<LayoutProps> = ({
     [UserRole.STOREKEEPER]: ['dashboard', 'inventory', 'entities'],
     [UserRole.INVENTORY_CONTROLLER]: ['dashboard', 'inventory', 'reports', 'entities'],
     [UserRole.ACCOUNTANT]: ['dashboard', 'finance', 'reports', 'archive', 'entities'],
-    [UserRole.AUDITOR]: ['dashboard', 'inventory', 'clinical', 'finance', 'reports', 'archive', 'entities']
+    [UserRole.AUDITOR]: ['dashboard', 'approvals', 'inventory', 'clinical', 'finance', 'reports', 'archive', 'entities']
   };
 
   const userPerms = currentUser ? rolePermissions[currentUser.role] : [];
@@ -73,9 +74,11 @@ const Layout: React.FC<LayoutProps> = ({
   ];
 
   const menuItems = allMenuItems.filter(item => userPerms.includes(item.id));
-  const activeBranch = branches.find(b => b.id === currentBranchId);
+  const activeBranch = branches.find(b => branchIdsMatch(b.id, currentBranchId));
   const isHeadOffice = activeBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';
-  const activeBranchName = activeBranch?.name || (isHeadOffice ? 'Head Office' : 'Unknown Branch');
+  const activeBranchName = activeBranch
+    ? getBranchDisplayName(branches, activeBranch.id, 'Unknown Branch')
+    : (isHeadOffice ? 'Head Office 👑' : 'Unknown Branch');
   const activeBranchLocation = activeBranch?.location || (isHeadOffice ? 'Central Office' : 'Location not available');
   const isSuperAdmin = currentUser?.role === UserRole.SUPER_ADMIN;
 
@@ -112,7 +115,7 @@ const Layout: React.FC<LayoutProps> = ({
         <aside className="hidden lg:flex flex-col w-48 bg-teal-900 text-white shadow-xl no-print">
         <div className="p-3 border-b border-teal-800">
           <h1 className="text-lg font-bold tracking-tight">PMS<span className="text-teal-400">.</span></h1>
-          <p className="text-xs text-teal-300 mt-0.5">Pharmacy Mgmt</p>
+          <p className="text-xs text-teal-300 mt-0.5">Pharmacy Managent System</p>
         </div>
 
         {/* Branch Switcher (Only for Super Admin) */}
@@ -131,7 +134,7 @@ const Layout: React.FC<LayoutProps> = ({
                >
                  {branches.map(branch => (
                    <option key={branch.id} value={branch.id}>
-                     {branch.name}
+                     {getBranchDisplayName(branches, branch.id, branch.name)}
                    </option>
                  ))}
                </select>
@@ -146,7 +149,7 @@ const Layout: React.FC<LayoutProps> = ({
            {!isHeadOffice && (
              <div className="mt-1 flex items-center text-xs text-teal-300 px-0.5">
                <MapPin size={10} className="mr-1" />
-               <span className="truncate text-xs">{branches.find(b => b.id === currentBranchId)?.location}</span>
+               <span className="truncate text-xs">{branches.find(b => branchIdsMatch(b.id, currentBranchId))?.location}</span>
              </div>
            )}
         </div>
@@ -204,7 +207,7 @@ const Layout: React.FC<LayoutProps> = ({
                  className="w-full p-2 bg-teal-800 text-white rounded-lg border border-teal-700 text-sm"
                >
                  {branches.map(branch => (
-                   <option key={branch.id} value={branch.id}>{branch.name}</option>
+                   <option key={branch.id} value={branch.id}>{getBranchDisplayName(branches, branch.id, branch.name)}</option>
                  ))}
                </select>
             </div>
@@ -233,7 +236,7 @@ const Layout: React.FC<LayoutProps> = ({
         )}
 
         {/* Main Content Area */}
-        <main className="flex-1 overflow-y-auto bg-slate-50 scroll-smooth">
+        <main id="app-main-scroll" className="flex-1 overflow-y-auto bg-slate-50 scroll-smooth">
           <div className="max-w-7xl mx-auto p-2 md:p-3 lg:p-4">
              {/* Context Banner */}
              <div className="mb-3 flex items-center justify-between bg-white p-2 rounded-lg shadow-sm border border-slate-200 no-print">

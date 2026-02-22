@@ -7,6 +7,9 @@ global $pdo;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $id = $_GET['id'] ?? null;
+$action = $_GET['action'] ?? null;
+$requestPath = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?? '';
+$isDirectShipmentPath = str_ends_with($requestPath, '/shipments/create-direct');
 
 switch ($method) {
     case 'GET':
@@ -17,7 +20,7 @@ switch ($method) {
         }
         break;
     case 'POST':
-        if ($_GET['action'] === 'create-direct') {
+        if ($action === 'create-direct' || $isDirectShipmentPath) {
             createDirectShipment();
         } else {
             createShipment();
@@ -33,11 +36,121 @@ switch ($method) {
         echo json_encode(['error' => 'Method not allowed']);
 }
 
+function invoicesHasColumn(string $columnName): bool {
+    global $pdo;
+    static $columnCache = [];
+
+    if (array_key_exists($columnName, $columnCache)) {
+        return $columnCache[$columnName];
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT COUNT(*) AS c
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'invoices'
+          AND COLUMN_NAME = ?
+    ");
+    $stmt->execute([$columnName]);
+    $result = $stmt->fetch();
+    $columnCache[$columnName] = ((int)($result['c'] ?? 0) > 0);
+
+    return $columnCache[$columnName];
+}
+
+function insertShipmentInvoice(
+    string $invoiceId,
+    string $branchId,
+    string $customerName,
+    float $totalValue,
+    ?string $description,
+    string $itemsJson
+): void {
+    global $pdo;
+
+    $hasCustomerPhone = invoicesHasColumn('customer_phone');
+    if ($hasCustomerPhone) {
+        $stmt = $pdo->prepare('
+            INSERT INTO invoices
+              (id, branch_id, customer_name, customer_phone, total_amount, paid_amount, status, due_date, description, source, items, archived, created_at)
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ');
+        $ok = $stmt->execute([$invoiceId, $branchId, $customerName, '', $totalValue, 0, 'UNPAID', null, $description, 'SHIPMENT', $itemsJson, 0]);
+    } else {
+        $stmt = $pdo->prepare('
+            INSERT INTO invoices
+              (id, branch_id, customer_name, total_amount, paid_amount, status, due_date, description, source, items, archived, created_at)
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ');
+        $ok = $stmt->execute([$invoiceId, $branchId, $customerName, $totalValue, 0, 'UNPAID', null, $description, 'SHIPMENT', $itemsJson, 0]);
+    }
+
+    if (!$ok) {
+        $err = $stmt->errorInfo();
+        throw new Exception('Failed to create invoice: ' . json_encode($err));
+    }
+}
+
+function getNextShipmentInvoiceSequence(string $prefix): int {
+    global $pdo;
+
+    $startPos = strlen($prefix) + 1;
+    $regex = '^' . preg_quote($prefix, '/') . '[0-9]{4}$';
+    $stmt = $pdo->prepare("
+        SELECT COALESCE(MAX(CAST(SUBSTRING(id, ?) AS UNSIGNED)), 0) AS max_num
+        FROM invoices
+        WHERE id REGEXP ?
+    ");
+    $stmt->execute([$startPos, $regex]);
+    $row = $stmt->fetch();
+
+    return ((int)($row['max_num'] ?? 0)) + 1;
+}
+
+function generateNextShipmentInvoiceNumber(): string {
+    $prefix = 'INV-SHIP-';
+    $nextNumber = getNextShipmentInvoiceSequence($prefix);
+    return $prefix . str_pad((string)$nextNumber, 4, '0', STR_PAD_LEFT);
+}
+
+function generateNextTransferId(): string {
+    global $pdo;
+
+    $stmt = $pdo->query("
+        SELECT COALESCE(MAX(
+            CASE
+                WHEN id REGEXP '^TRANS-[0-9]+$' THEN CAST(SUBSTRING(id, 7) AS UNSIGNED)
+                WHEN id REGEXP '^[0-9]+$' THEN CAST(id AS UNSIGNED)
+                ELSE 0
+            END
+        ), 0) AS max_num
+        FROM stock_transfers
+    ");
+    $row = $stmt->fetch();
+    $nextNumber = ((int)($row['max_num'] ?? 0)) + 1;
+    return 'TRANS-' . str_pad((string)$nextNumber, 4, '0', STR_PAD_LEFT);
+}
+
+function generateNextShipmentId(): string {
+    global $pdo;
+
+    $stmt = $pdo->query("
+        SELECT COALESCE(MAX(CAST(id AS UNSIGNED)), 0) AS max_num
+        FROM shipments
+        WHERE id REGEXP '^[0-9]+$'
+    ");
+    $row = $stmt->fetch();
+    $nextNumber = ((int)($row['max_num'] ?? 0)) + 1;
+    return str_pad((string)$nextNumber, 4, '0', STR_PAD_LEFT);
+}
+
 function getShipments() {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'AUDITOR']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'STOREKEEPER', 'AUDITOR']);
         $stmt = $pdo->query('SELECT * FROM shipments ORDER BY created_at DESC');
         $shipments = $stmt->fetchAll();
         echo json_encode($shipments);
@@ -52,7 +165,7 @@ function getShipment($id) {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'AUDITOR']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'STOREKEEPER', 'AUDITOR']);
         $stmt = $pdo->prepare('SELECT * FROM shipments WHERE id = ?');
         $stmt->execute([$id]);
         $shipment = $stmt->fetch();
@@ -111,7 +224,7 @@ function createShipment() {
         $fromBranchId = $input['fromBranchId'] ?? '';
         $toBranchId = $input['toBranchId'] ?? '';
         $status = $input['status'] ?? 'PENDING';
-        $totalValue = $input['totalValue'] ?? 0;
+        $totalValue = (float)($input['totalValue'] ?? 0);
         $notes = $input['notes'] ?? '';
         $items = $input['items'] ?? [];
 
@@ -191,7 +304,7 @@ function createShipment() {
         $pdo->beginTransaction();
 
         try {
-            $shipmentId = 'SHIP-' . uniqid();
+            $shipmentId = generateNextShipmentId();
             error_log("Creating shipment with ID: $shipmentId");
 
             // Use NULL for verification_code to avoid unique constraint issues
@@ -215,7 +328,7 @@ function createShipment() {
 
             error_log('Shipment created successfully: ' . $shipmentId);
 
-            // Create invoices for both branches so the shipment appears under both
+            // Create a single shipment invoice (INV-SHIP-*) per shipment.
             $invoiceItems = array_map(function($item) {
                 return [
                     'productId' => $item['productId'] ?? $item['product_id'],
@@ -238,27 +351,10 @@ function createShipment() {
             $toBranch = $stmt->fetch();
             $toBranchName = $toBranch ? $toBranch['name'] : $toBranchId;
 
-            // From-branch invoice
-            $invoiceIdFrom = 'INV-SHIP-' . str_replace('.', '', uniqid('', true));
-            $stmt = $pdo->prepare('INSERT INTO invoices (id, branch_id, customer_name, total_amount, paid_amount, status, due_date, description, source, items, archived, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+            $invoiceId = generateNextShipmentInvoiceNumber();
             $customerName = "Branch Transfer: {$fromBranchName} to {$toBranchName}";
-            $okFrom = $stmt->execute([$invoiceIdFrom, $fromBranchId, $customerName, $totalValue, 0, 'UNPAID', null, $baseDesc, 'SHIPMENT', json_encode($invoiceItems), 0]);
-            if (!$okFrom) {
-                $err = $stmt->errorInfo();
-                error_log('Invoice insert failed (from): ' . json_encode($err));
-                throw new Exception('Failed to create from-branch invoice: ' . json_encode($err));
-            }
-            error_log('Invoice created (from): ' . $invoiceIdFrom);
-
-            // To-branch invoice (so receiving branch also sees the invoice)
-            $invoiceIdTo = 'INV-RECV-' . str_replace('.', '', uniqid('', true));
-            $okTo = $stmt->execute([$invoiceIdTo, $toBranchId, $customerName, $totalValue, 0, 'UNPAID', null, $baseDesc, 'SHIPMENT', json_encode($invoiceItems), 0]);
-            if (!$okTo) {
-                $err2 = $stmt->errorInfo();
-                error_log('Invoice insert failed (to): ' . json_encode($err2));
-                throw new Exception('Failed to create to-branch invoice: ' . json_encode($err2));
-            }
-            error_log('Invoice created (to): ' . $invoiceIdTo);
+            insertShipmentInvoice($invoiceId, $fromBranchId, $customerName, $totalValue, $baseDesc, json_encode($invoiceItems));
+            error_log('Invoice created: ' . $invoiceId);
 
             // Deduct inventory from from-branch and add to to-branch
             foreach ($items as $item) {
@@ -309,9 +405,14 @@ function createShipment() {
             $response = [
                 'message' => 'Shipment created successfully',
                 'shipment' => $shipment,
+                'invoice' => [
+                    'id' => $invoiceId,
+                    'totalAmount' => $totalValue,
+                    'status' => 'UNPAID',
+                    'created' => true
+                ],
                 'invoices' => [
-                    'fromBranchInvoice' => $invoiceIdFrom,
-                    'toBranchInvoice' => $invoiceIdTo,
+                    'shipmentInvoice' => $invoiceId,
                     'status' => 'created'
                 ],
                 'inventory' => [
@@ -464,7 +565,7 @@ function createDirectShipment() {
 
         try {
             // Create transfer
-            $transferId = 'TRANSFER-' . uniqid();
+            $transferId = generateNextTransferId();
             $transferItems = array_map(function($item) {
                 return [
                     'productId' => $item['productId'] ?? $item['product_id'],
@@ -476,6 +577,14 @@ function createDirectShipment() {
                 ];
             }, $items);
 
+            // Always derive shipment value from line items to avoid client-side mismatches.
+            $calculatedTotalValue = array_reduce($transferItems, function($sum, $item) {
+                return $sum + (((int)$item['quantity']) * ((float)$item['price']));
+            }, 0.0);
+            if ($calculatedTotalValue > 0) {
+                $totalValue = $calculatedTotalValue;
+            }
+
             $stmt = $pdo->prepare("
                 INSERT INTO stock_transfers
                 (id, from_branch_id, to_branch_id, products, status, notes, created_by, created_at)
@@ -484,14 +593,14 @@ function createDirectShipment() {
             $stmt->execute([$transferId, $fromBranchId, $toBranchId, json_encode($transferItems), $notes, $user['id'] ?? null]);
 
             // Create shipment
-            $shipmentId = 'SHIP-' . uniqid();
+            $shipmentId = generateNextShipmentId();
             $verificationCode = null;
 
             $stmt = $pdo->prepare('INSERT INTO shipments (id, transfer_id, from_branch_id, to_branch_id, status, verification_code, total_value, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
             $stmt->execute([$shipmentId, $transferId, $fromBranchId, $toBranchId, $status, $verificationCode, $totalValue, $notes, $user['id'] ?? null]);
 
-            // Generate invoice immediately (use higher-entropy id to avoid collisions)
-            $invoiceId = 'INV-SHIP-' . str_replace('.', '', uniqid('', true));
+            // Generate one invoice for this shipment using INV-SHIP-*.
+            $invoiceId = generateNextShipmentInvoiceNumber();
             $invoiceItems = array_map(function($item) {
                 return [
                     'productId' => $item['productId'] ?? $item['product_id'],
@@ -512,17 +621,11 @@ function createDirectShipment() {
             $toBranch = $stmt->fetch();
             $toBranchName = $toBranch ? $toBranch['name'] : $toBranchId;
 
-            // Insert invoice (remove customer_phone as it doesn't exist in invoices table)
-            $stmt = $pdo->prepare('INSERT INTO invoices (id, branch_id, customer_name, total_amount, paid_amount, status, due_date, description, source, items, archived, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
             $customerName = "Branch Transfer: {$fromBranchName} to {$toBranchName}";
             $description = "Shipment Invoice - Transfer ID: {$transferId}";
-            error_log('About to insert invoice: ' . $invoiceId);
-            $invoiceResult = $stmt->execute([$invoiceId, $fromBranchId, $customerName, $totalValue, 0, 'UNPAID', null, $description, 'SHIPMENT', json_encode($invoiceItems), 0]);
-            if (!$invoiceResult) {
-                $err = $stmt->errorInfo();
-                error_log('Invoice insert failed: ' . json_encode($err));
-                throw new Exception('Failed to create invoice: ' . json_encode($err));
-            }
+            $invoiceItemsJson = json_encode($invoiceItems);
+            error_log('About to insert shipment invoice: ' . $invoiceId);
+            insertShipmentInvoice($invoiceId, $fromBranchId, $customerName, $totalValue, $description, $invoiceItemsJson);
             error_log('Invoice created successfully: ' . $invoiceId);
 
             // Deduct inventory from from-branch and add to to-branch
@@ -593,6 +696,10 @@ function createDirectShipment() {
                     'created' => true,
                     'message' => 'Invoice created successfully'
                 ],
+                'invoices' => [
+                    'shipmentInvoice' => $invoiceId,
+                    'status' => 'created'
+                ],
                 'inventory' => [
                     'status' => 'deducted',
                     'message' => 'Inventory transferred from ' . $fromBranchName . ' to ' . $toBranchName,
@@ -615,14 +722,19 @@ function createDirectShipment() {
         
         // Determine what failed
         $failureType = 'unknown';
+        $userError = 'Failed to create shipment';
         if (strpos($e->getMessage(), 'invoice') !== false) {
             $failureType = 'invoice creation';
         } elseif (strpos($e->getMessage(), 'inventory') !== false) {
             $failureType = 'inventory deduction';
+        } elseif (stripos($e->getMessage(), 'Out of range value for column \'total_value\'') !== false
+            || stripos($e->getMessage(), 'Out of range value for column \'total_amount\'') !== false) {
+            $failureType = 'amount overflow';
+            $userError = 'Shipment total is too large for current database precision. Run migration: backend_php/migrations/expand_financial_amount_precision.sql';
         }
         
         echo json_encode([
-            'error' => 'Failed to create shipment',
+            'error' => $userError,
             'failureType' => $failureType,
             'details' => $e->getMessage(),
             'file' => basename($e->getFile()),

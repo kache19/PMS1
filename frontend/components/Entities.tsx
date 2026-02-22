@@ -8,12 +8,15 @@ interface EntitiesProps {
   mode?: 'selection' | 'management';
 }
 
+const PAYMENT_TERM_OPTIONS = ['CASH', 'MOBILE', 'BANK'] as const;
+
 export default function Entities({ onSelectCustomer, onSelectSupplier, mode = 'management' }: EntitiesProps) {
   const [entities, setEntities] = useState<Entity[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState<EntityType | 'ALL'>('ALL');
+  const [filterStatus, setFilterStatus] = useState<EntityStatus | 'ALL'>('ACTIVE');
   const [showModal, setShowModal] = useState(false);
   const [editingEntity, setEditingEntity] = useState<Entity | null>(null);
   const [formData, setFormData] = useState<Partial<Entity>>({
@@ -41,23 +44,20 @@ export default function Entities({ onSelectCustomer, onSelectSupplier, mode = 'm
     try {
       const params: { type?: string; status?: string } = {};
       if (filterType !== 'ALL') params.type = filterType;
-      params.status = 'ACTIVE';
-      
-      // Debug: check if token exists
-      const token = sessionStorage.getItem('authToken');
-      console.log('[Entities] Auth token exists:', !!token);
-      console.log('[Entities] Fetching entities with params:', params);
-      
+      if (mode === 'selection') {
+        params.status = 'ACTIVE';
+      } else if (filterStatus !== 'ALL') {
+        params.status = filterStatus;
+      }
+
       const data = await api.getEntities(params);
-      console.log('[Entities] Fetched entities:', data);
       setEntities(data);
     } catch (err: any) {
-      console.error('[Entities] Error fetching entities:', err);
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [filterType]);
+  }, [filterType, filterStatus, mode]);
 
   useEffect(() => {
     fetchEntities();
@@ -65,10 +65,23 @@ export default function Entities({ onSelectCustomer, onSelectSupplier, mode = 'm
 
   const filteredEntities = entities.filter(entity => {
     const matchesSearch = entity.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                         entity.tin?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                         entity.contactPerson?.toLowerCase().includes(searchTerm.toLowerCase()) ||
                          entity.phone?.toLowerCase().includes(searchTerm.toLowerCase()) ||
                          entity.email?.toLowerCase().includes(searchTerm.toLowerCase());
     return matchesSearch;
   });
+
+  const summary = filteredEntities.reduce(
+    (acc, entity) => {
+      acc.total += 1;
+      if (entity.type === 'CUSTOMER') acc.customers += 1;
+      if (entity.type === 'SUPPLIER') acc.suppliers += 1;
+      if (entity.type === 'BOTH') acc.both += 1;
+      return acc;
+    },
+    { total: 0, customers: 0, suppliers: 0, both: 0 }
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -156,6 +169,15 @@ export default function Entities({ onSelectCustomer, onSelectSupplier, mode = 'm
     }
   };
 
+  const getPaymentTermsBadgeColor = (paymentTerms?: string) => {
+    switch (String(paymentTerms || '').toUpperCase()) {
+      case 'CASH': return 'bg-emerald-100 text-emerald-800';
+      case 'MOBILE': return 'bg-blue-100 text-blue-800';
+      case 'BANK': return 'bg-indigo-100 text-indigo-800';
+      default: return 'bg-gray-100 text-gray-700';
+    }
+  };
+
   return (
     <div className="p-6 bg-white rounded-lg shadow-md">
       <div className="flex justify-between items-center mb-6">
@@ -176,7 +198,7 @@ export default function Entities({ onSelectCustomer, onSelectSupplier, mode = 'm
       <div className="flex gap-4 mb-6">
         <input
           type="text"
-          placeholder="Search by name, phone, or email..."
+          placeholder="Search by name, TIN, contact, phone, or email..."
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
@@ -191,6 +213,37 @@ export default function Entities({ onSelectCustomer, onSelectSupplier, mode = 'm
           <option value="SUPPLIER">Suppliers Only</option>
           <option value="BOTH">Both</option>
         </select>
+        {mode === 'management' && (
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value as EntityStatus | 'ALL')}
+            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          >
+            <option value="ALL">All Status</option>
+            <option value="ACTIVE">Active</option>
+            <option value="INACTIVE">Inactive</option>
+            <option value="BLOCKED">Blocked</option>
+          </select>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+          <p className="text-xs text-gray-500">Total</p>
+          <p className="text-xl font-bold text-gray-800">{summary.total}</p>
+        </div>
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+          <p className="text-xs text-blue-600">Customers</p>
+          <p className="text-xl font-bold text-blue-800">{summary.customers}</p>
+        </div>
+        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3">
+          <p className="text-xs text-green-600">Suppliers</p>
+          <p className="text-xl font-bold text-green-800">{summary.suppliers}</p>
+        </div>
+        <div className="rounded-lg border border-purple-200 bg-purple-50 px-4 py-3">
+          <p className="text-xs text-purple-600">Both</p>
+          <p className="text-xl font-bold text-purple-800">{summary.both}</p>
+        </div>
       </div>
 
       {/* Error Message */}
@@ -252,7 +305,11 @@ export default function Entities({ onSelectCustomer, onSelectSupplier, mode = 'm
                     </div>
                   </td>
                   <td className="px-4 py-3 border-b text-sm">{entity.city || '-'}</td>
-                  <td className="px-4 py-3 border-b text-sm">{entity.paymentTerms || '-'}</td>
+                  <td className="px-4 py-3 border-b text-sm">
+                    <span className={`px-2 py-1 text-xs font-semibold rounded-full ${getPaymentTermsBadgeColor(entity.paymentTerms)}`}>
+                      {entity.paymentTerms || 'CASH'}
+                    </span>
+                  </td>
                   <td className="px-4 py-3 border-b text-sm">
                     {entity.creditLimit > 0 ? `TZS ${entity.creditLimit.toLocaleString()}` : '-'}
                   </td>
@@ -419,11 +476,9 @@ export default function Entities({ onSelectCustomer, onSelectSupplier, mode = 'm
                     onChange={(e) => setFormData({ ...formData, paymentTerms: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   >
-                    <option value="CASH">Cash</option>
-                    <option value="NET7">Net 7 Days</option>
-                    <option value="NET15">Net 15 Days</option>
-                    <option value="NET30">Net 30 Days</option>
-                    <option value="NET60">Net 60 Days</option>
+                    {PAYMENT_TERM_OPTIONS.map((term) => (
+                      <option key={term} value={term}>{term}</option>
+                    ))}
                   </select>
                 </div>
 

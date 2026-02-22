@@ -2,8 +2,6 @@
 /**
  * Mailer utility using PHPMailer
  * Configure SMTP in config/mail.php
- * @property int $Timeout
- * @property array $SMTPOptions
  */
 
 // Load Composer autoloader
@@ -63,21 +61,19 @@ function sendMail($to, $subject, $htmlBody, $altBody = '') {
             
             $mail->Port = (int)($smtp['port'] ?? 587);
             
-            // Production settings - suppress deprecation warnings
-            // For PHP 8.2+ compatibility, suppress deprecation notices when setting dynamic properties
-            $previousErrorReporting = error_reporting();
-            error_reporting($previousErrorReporting & ~E_DEPRECATED);
-            
-            $mail->Timeout = $production['timeout'] ?? 15;
-            $mail->SMTPOptions = array(
-                'ssl' => array(
-                    'verify_peer' => false,
-                    'verify_peer_name' => false,
-                    'allow_self_signed' => true
-                )
-            );
-            
-            error_reporting($previousErrorReporting);
+            // Avoid writing unknown dynamic properties on newer PHP/PHPMailer combinations.
+            if (property_exists($mail, 'Timeout')) {
+                $mail->Timeout = (int)($production['timeout'] ?? 15);
+            }
+            if (property_exists($mail, 'SMTPOptions')) {
+                $mail->SMTPOptions = array(
+                    'ssl' => array(
+                        'verify_peer' => false,
+                        'verify_peer_name' => false,
+                        'allow_self_signed' => true
+                    )
+                );
+            }
 
             // From configuration
             $mail->setFrom(

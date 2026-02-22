@@ -40,6 +40,14 @@ if (isset($_GET['subpath'])) $action = $_GET['subpath'];
 
 switch ($method) {
     case 'GET':
+        if (
+            $action === 'transfers'
+            || str_contains($path, '/inventory/transfers')
+            || (isset($_GET['subpath']) && $_GET['subpath'] === 'transfers')
+        ) {
+            getTransfers();
+            break;
+        }
         // Support both path-based (/api/inventory/BR002) and query-based (/api/inventory?id=BR002) routing
         $branchId = $id ?: ($_GET['id'] ?? null);
         if ($branchId) {
@@ -49,9 +57,19 @@ switch ($method) {
         }
         break;
     case 'POST':
+        if ($id && str_contains($path, '/verify-storekeeper')) {
+            verifyTransferByStoreKeeper($id);
+        } elseif ($id && str_contains($path, '/verify-controller')) {
+            verifyTransferByController($id);
+        } elseif ($id && str_contains($path, '/reject')) {
+            rejectTransfer($id);
+        } elseif ($id && str_contains($path, '/approve')) {
+            approveTransfer($id);
         // Accept both singular 'transfer' and plural 'transfers' (frontend uses 'inventory/transfers')
-        if ($action === 'transfer' || $action === 'transfers' || $path === '/inventory/transfers' || (isset($_GET['subpath']) && $_GET['subpath'] === 'transfers')) {
+        } elseif ($action === 'transfer' || $action === 'transfers' || $path === '/inventory/transfers' || (isset($_GET['subpath']) && $_GET['subpath'] === 'transfers')) {
             createTransfer();
+        } elseif ($action === 'addStockBulk' || $action === 'addBulk') {
+            addStockBulk();
         } elseif ($action === 'addStock' || $action === 'add') {
             addStock();
         } elseif ($action === 'adjust') {
@@ -64,6 +82,11 @@ switch ($method) {
     case 'PUT':
         if ($id && $action === 'verify') {
             verifyTransferByStoreKeeper($id);
+        } elseif ($id && $id2) {
+            updateInventoryItem($id, $id2);
+        } else {
+            http_response_code(400);
+            echo json_encode(['error' => 'Missing inventory identifiers']);
         }
         break;
     default:
@@ -71,11 +94,295 @@ switch ($method) {
         echo json_encode(['error' => 'Method not allowed']);
 }
 
+function transformTransferRow(array $transfer): array {
+    $products = json_decode($transfer['products'] ?? '[]', true);
+    if (!is_array($products)) {
+        $products = [];
+    }
+
+    $items = array_map(function($product) {
+        return [
+            'productId' => $product['productId'] ?? '',
+            'productName' => $product['productName'] ?? '',
+            'quantity' => (int)($product['quantity'] ?? 0),
+            'batchNumber' => $product['batchNumber'] ?? '',
+            'expiryDate' => $product['expiryDate'] ?? ''
+        ];
+    }, $products);
+
+    $verifiedBy = [];
+    if (!empty($transfer['storekeeper_verified']) || !empty($transfer['storekeeper_verified_by']) || !empty($transfer['storekeeper_verified_at'])) {
+        $verifiedBy['storeKeeper'] = [
+            'userId' => (string)($transfer['storekeeper_verified_by'] ?? ''),
+            'userName' => $transfer['storekeeper_name'] ?? 'Store Keeper',
+            'timestamp' => $transfer['storekeeper_verified_at'] ?? null
+        ];
+    }
+    if (!empty($transfer['controller_verified']) || !empty($transfer['controller_verified_by']) || !empty($transfer['controller_verified_at'])) {
+        $verifiedBy['inventoryController'] = [
+            'userId' => (string)($transfer['controller_verified_by'] ?? ''),
+            'userName' => $transfer['controller_name'] ?? 'Inventory Controller',
+            'timestamp' => $transfer['controller_verified_at'] ?? null
+        ];
+    }
+
+    return [
+        'id' => $transfer['id'],
+        'sourceBranchId' => $transfer['from_branch_id'],
+        'targetBranchId' => $transfer['to_branch_id'],
+        'dateSent' => $transfer['date_sent'] ?? $transfer['created_at'],
+        'dateReceived' => $transfer['date_received'],
+        'items' => $items,
+        'status' => $transfer['status'],
+        'notes' => $transfer['notes'],
+        'createdBy' => $transfer['created_by'],
+        'verifiedBy' => $verifiedBy
+    ];
+}
+
+function getTransferByIdDetailed(string $id): ?array {
+    global $pdo;
+    $canJoinStorekeeper = tableHasColumn('stock_transfers', 'storekeeper_verified_by');
+    $canJoinController = tableHasColumn('stock_transfers', 'controller_verified_by');
+    $storekeeperJoin = $canJoinStorekeeper ? 'LEFT JOIN staff sk ON sk.id = t.storekeeper_verified_by' : '';
+    $controllerJoin = $canJoinController ? 'LEFT JOIN staff ic ON ic.id = t.controller_verified_by' : '';
+    $storekeeperName = $canJoinStorekeeper ? 'sk.name AS storekeeper_name' : 'NULL AS storekeeper_name';
+    $controllerName = $canJoinController ? 'ic.name AS controller_name' : 'NULL AS controller_name';
+    $stmt = $pdo->prepare("
+        SELECT t.*,
+               $storekeeperName,
+               $controllerName
+        FROM stock_transfers t
+        $storekeeperJoin
+        $controllerJoin
+        WHERE t.id = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$id]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row ?: null;
+}
+
+function tableHasColumn(string $tableName, string $columnName): bool {
+    global $pdo;
+    static $columnCache = [];
+
+    $cacheKey = $tableName . '.' . $columnName;
+    if (array_key_exists($cacheKey, $columnCache)) {
+        return $columnCache[$cacheKey];
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT COUNT(*) AS c
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = ?
+          AND COLUMN_NAME = ?
+    ");
+    $stmt->execute([$tableName, $columnName]);
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    $columnCache[$cacheKey] = ((int)($result['c'] ?? 0) > 0);
+
+    return $columnCache[$cacheKey];
+}
+
+function drugBatchSelectColumns(): string {
+    $cols = ['batch_number', 'expiry_date', 'quantity', 'status'];
+    $cols[] = tableHasColumn('drug_batches', 'supplier_id') ? 'supplier_id' : 'NULL AS supplier_id';
+    $cols[] = tableHasColumn('drug_batches', 'supplier_name') ? 'supplier_name' : 'NULL AS supplier_name';
+    $cols[] = tableHasColumn('drug_batches', 'restock_status') ? 'restock_status' : 'NULL AS restock_status';
+    $cols[] = tableHasColumn('drug_batches', 'last_restock_date') ? 'last_restock_date' : 'NULL AS last_restock_date';
+    return implode(', ', $cols);
+}
+
+function enumColumnAllowsValue(string $tableName, string $columnName, string $targetValue): bool {
+    global $pdo;
+    static $enumCache = [];
+
+    $cacheKey = $tableName . '.' . $columnName . '.' . $targetValue;
+    if (array_key_exists($cacheKey, $enumCache)) {
+        return $enumCache[$cacheKey];
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT DATA_TYPE, COLUMN_TYPE
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = ?
+          AND COLUMN_NAME = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$tableName, $columnName]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$row) {
+        $enumCache[$cacheKey] = false;
+        return false;
+    }
+
+    $dataType = strtolower((string)($row['DATA_TYPE'] ?? ''));
+    $columnType = (string)($row['COLUMN_TYPE'] ?? '');
+    if ($dataType !== 'enum') {
+        $enumCache[$cacheKey] = true;
+        return true;
+    }
+
+    $allowed = stripos($columnType, "'" . addslashes($targetValue) . "'") !== false;
+    $enumCache[$cacheKey] = $allowed;
+    return $allowed;
+}
+
+function ensureEnumColumnValue(string $tableName, string $columnName, string $targetValue): bool {
+    global $pdo;
+
+    if (enumColumnAllowsValue($tableName, $columnName, $targetValue)) {
+        return true;
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT COLUMN_TYPE, COLUMN_DEFAULT
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = ?
+          AND COLUMN_NAME = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$tableName, $columnName]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) return false;
+
+    $columnType = (string)($row['COLUMN_TYPE'] ?? '');
+    if (stripos($columnType, 'enum(') !== 0) {
+        return false;
+    }
+
+    preg_match_all("/'((?:[^'\\\\]|\\\\.)*)'/", $columnType, $matches);
+    $values = array_map(static function($v) {
+        return stripcslashes($v);
+    }, $matches[1] ?? []);
+    if (!in_array($targetValue, $values, true)) {
+        $values[] = $targetValue;
+    }
+    if (empty($values)) return false;
+
+    $quotedValues = array_map(static function($v) use ($pdo) {
+        return $pdo->quote($v);
+    }, $values);
+    $default = $row['COLUMN_DEFAULT'];
+    $defaultSql = '';
+    if ($default !== null && in_array((string)$default, $values, true)) {
+        $defaultSql = ' DEFAULT ' . $pdo->quote((string)$default);
+    }
+
+    $alterSql = "ALTER TABLE `$tableName` MODIFY `$columnName` ENUM(" . implode(', ', $quotedValues) . ")" . $defaultSql;
+    $pdo->exec($alterSql);
+
+    return enumColumnAllowsValue($tableName, $columnName, $targetValue);
+}
+
+function nextTransferSequenceId(): string {
+    global $pdo;
+
+    $stmt = $pdo->query("
+        SELECT COALESCE(MAX(
+            CASE
+                WHEN id REGEXP '^TRANS-[0-9]+$' THEN CAST(SUBSTRING(id, 7) AS UNSIGNED)
+                WHEN id REGEXP '^[0-9]+$' THEN CAST(id AS UNSIGNED)
+                ELSE 0
+            END
+        ), 0) AS max_num
+        FROM stock_transfers
+    ");
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    $next = ((int)($row['max_num'] ?? 0)) + 1;
+    return 'TRANS-' . str_pad((string)$next, 4, '0', STR_PAD_LEFT);
+}
+
+function getNextInventoryInvoiceSequence(string $prefix): int {
+    global $pdo;
+
+    $startPos = strlen($prefix) + 1;
+    $regex = '^' . preg_quote($prefix, '/') . '[0-9]{4}$';
+    $stmt = $pdo->prepare("
+        SELECT COALESCE(MAX(CAST(SUBSTRING(id, ?) AS UNSIGNED)), 0) AS max_num
+        FROM invoices
+        WHERE id REGEXP ?
+    ");
+    $stmt->execute([$startPos, $regex]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    return ((int)($row['max_num'] ?? 0)) + 1;
+}
+
+function generateNextRestockInvoiceNumber(): string {
+    $prefix = 'INV-RST-';
+    $nextNumber = getNextInventoryInvoiceSequence($prefix);
+    return $prefix . str_pad((string)$nextNumber, 4, '0', STR_PAD_LEFT);
+}
+
+function generateBatchNumber(int $offset = 0): string {
+    global $pdo;
+    static $baseSequence = null;
+
+    if ($baseSequence === null) {
+        $stmt = $pdo->query("
+            SELECT COALESCE(MAX(CAST(SUBSTRING(batch_number, 7, 5) AS UNSIGNED)), -1) AS max_num
+            FROM drug_batches
+            WHERE batch_number REGEXP '^BATCH-[0-9]{5}$'
+        ");
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $baseSequence = ((int)($row['max_num'] ?? -1)) + 1;
+    }
+
+    $value = ($baseSequence + $offset) % 100000;
+    return 'BATCH-' . str_pad((string)$value, 5, '0', STR_PAD_LEFT);
+}
+
+function insertRestockInvoice(
+    string $invoiceId,
+    string $branchId,
+    string $customerName,
+    float $totalAmount,
+    ?string $description,
+    string $itemsJson
+): void {
+    global $pdo;
+
+    $columns = ['id', 'branch_id', 'customer_name', 'total_amount', 'paid_amount', 'status', 'due_date', 'description', 'source', 'items'];
+    $placeholders = ['?', '?', '?', '?', '?', '?', '?', '?', '?', '?'];
+    $params = [$invoiceId, $branchId, $customerName, $totalAmount, 0, 'UNPAID', null, $description, 'RESTOCK', $itemsJson];
+
+    if (tableHasColumn('invoices', 'customer_phone')) {
+        $columns[] = 'customer_phone';
+        $placeholders[] = '?';
+        $params[] = '';
+    }
+    if (tableHasColumn('invoices', 'archived')) {
+        $columns[] = 'archived';
+        $placeholders[] = '?';
+        $params[] = 0;
+    }
+
+    $columns[] = 'created_at';
+    $placeholders[] = 'NOW()';
+
+    $stmt = $pdo->prepare('
+        INSERT INTO invoices (' . implode(', ', $columns) . ')
+        VALUES (' . implode(', ', $placeholders) . ')
+    ');
+    $ok = $stmt->execute($params);
+
+    if (!$ok) {
+        $err = $stmt->errorInfo();
+        throw new Exception('Failed to create restock invoice: ' . json_encode($err));
+    }
+}
+
 function getAllInventory() {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'STOREKEEPER']);
 
         $stmt = $pdo->query("
             SELECT
@@ -96,8 +403,9 @@ function getAllInventory() {
             $productId = $row['product_id'];
 
             // Get batches for this product
+            $batchSelectColumns = drugBatchSelectColumns();
             $batchStmt = $pdo->prepare("
-                SELECT batch_number, expiry_date, quantity, status, supplier_id, supplier_name, restock_status, last_restock_date
+                SELECT $batchSelectColumns
                 FROM drug_batches
                 WHERE branch_id = ? AND product_id = ?
                 ORDER BY expiry_date
@@ -324,7 +632,35 @@ function getBranchInventory($branchId) {
 
     try {
         // authorizeRoles returns null for unauthenticated GET requests
-        $user = authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER']);
+        $user = authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'STOREKEEPER', 'DISPENSER', 'PHARMACIST']);
+
+        $normalizeBranchId = static function($value) {
+            return strtoupper(trim((string)$value));
+        };
+        $branchIdsMatch = static function($a, $b) use ($normalizeBranchId) {
+            $aRaw = $normalizeBranchId($a);
+            $bRaw = $normalizeBranchId($b);
+            if ($aRaw === '' || $bRaw === '') return false;
+            if ($aRaw === $bRaw) return true;
+
+            $aVariants = [$aRaw];
+            $bVariants = [$bRaw];
+
+            if (preg_match('/^BR0*(\d+)$/', $aRaw, $m)) $aVariants[] = (string)((int)$m[1]);
+            if (preg_match('/^\d+$/', $aRaw)) $aVariants[] = 'BR' . str_pad((string)((int)$aRaw), 3, '0', STR_PAD_LEFT);
+            if (preg_match('/^BR0*(\d+)$/', $bRaw, $m)) $bVariants[] = (string)((int)$m[1]);
+            if (preg_match('/^\d+$/', $bRaw)) $bVariants[] = 'BR' . str_pad((string)((int)$bRaw), 3, '0', STR_PAD_LEFT);
+
+            return count(array_intersect($aVariants, $bVariants)) > 0;
+        };
+
+        $role = strtoupper((string)($user['role'] ?? ''));
+        $isScopedReadRole = in_array($role, ['DISPENSER', 'PHARMACIST'], true);
+        if ($isScopedReadRole && !$branchIdsMatch($user['branch_id'] ?? '', $branchId)) {
+            http_response_code(403);
+            echo json_encode(['error' => 'You can only access inventory for your assigned branch']);
+            return;
+        }
         
         // Get all inventory items for the branch
         $stmt = $pdo->prepare("
@@ -349,8 +685,9 @@ function getBranchInventory($branchId) {
         // Get all batches for the branch in a single query
         $productIds = array_column($rows, 'product_id');
         $placeholders = implode(',', array_fill(0, count($productIds), '?'));
+        $batchSelectColumns = drugBatchSelectColumns();
         $batchStmt = $pdo->prepare("
-            SELECT product_id, batch_number, expiry_date, quantity, status, supplier_id, supplier_name, restock_status, last_restock_date
+            SELECT product_id, $batchSelectColumns
             FROM drug_batches
             WHERE branch_id = ? AND product_id IN ($placeholders)
             ORDER BY product_id, expiry_date
@@ -412,7 +749,7 @@ function addStock() {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_CONTROLLER']);
+        $user = authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_CONTROLLER', 'STOREKEEPER']);
         $input = json_decode(file_get_contents('php://input'), true);
 
         if (!$input || !is_array($input)) {
@@ -423,56 +760,390 @@ function addStock() {
 
         $branchId = $input['branchId'] ?? '';
         $productId = $input['productId'] ?? '';
-        $batchNumber = $input['batchNumber'] ?? '';
+        $batchNumber = trim((string)($input['batchNumber'] ?? ''));
+        if ($batchNumber === '') {
+            $batchNumber = generateBatchNumber();
+        }
         $expiryDate = $input['expiryDate'] ?? '';
         $quantity = (int)($input['quantity'] ?? 0);
         $supplierId = $input['supplierId'] ?? null;
         $supplierName = $input['supplierName'] ?? null;
         $restockStatus = $input['restockStatus'] ?? 'RECEIVED';
         $lastRestockDate = date('Y-m-d H:i:s');
+        $costPriceRaw = $input['costPrice'] ?? null;
+        $sellingPriceRaw = $input['sellingPrice'] ?? ($input['basePrice'] ?? null);
+        $costPrice = ($costPriceRaw === '' || $costPriceRaw === null) ? null : (float)$costPriceRaw;
+        $sellingPrice = ($sellingPriceRaw === '' || $sellingPriceRaw === null) ? null : (float)$sellingPriceRaw;
+        $normalizedRole = strtoupper((string)($user['role'] ?? ''));
+        if ($normalizedRole === 'BRANCH_MANAGER') {
+            // Branch managers can restock, but cannot update buying/selling prices.
+            $costPrice = null;
+            $sellingPrice = null;
+        }
 
         $pdo->beginTransaction();
 
         // Validate core fields
         if (empty($branchId) || empty($productId) || $quantity <= 0) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
             http_response_code(400);
             echo json_encode(['error' => 'branchId, productId and quantity (>0) are required']);
             return;
         }
+        if ($costPrice !== null && $costPrice < 0) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            http_response_code(400);
+            echo json_encode(['error' => 'costPrice cannot be negative']);
+            return;
+        }
+        if ($sellingPrice !== null && $sellingPrice < 0) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            http_response_code(400);
+            echo json_encode(['error' => 'sellingPrice cannot be negative']);
+            return;
+        }
+
+        $productStmt = $pdo->prepare('SELECT id, name, cost_price, base_price FROM products WHERE id = ? LIMIT 1');
+        $productStmt->execute([$productId]);
+        $product = $productStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$product) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            http_response_code(404);
+            echo json_encode(['error' => 'Product not found']);
+            return;
+        }
+
+        if ($costPrice !== null || $sellingPrice !== null) {
+            $priceSetParts = [];
+            $priceSetParams = [];
+            if ($costPrice !== null) {
+                $priceSetParts[] = 'cost_price = ?';
+                $priceSetParams[] = $costPrice;
+            }
+            if ($sellingPrice !== null) {
+                $priceSetParts[] = 'base_price = ?';
+                $priceSetParams[] = $sellingPrice;
+            }
+            $priceSetParams[] = $productId;
+            $updateProductPrices = $pdo->prepare('UPDATE products SET ' . implode(', ', $priceSetParts) . ' WHERE id = ?');
+            $updateProductPrices->execute($priceSetParams);
+        }
+
+        $resolvedCostPrice = $costPrice !== null ? $costPrice : (float)($product['cost_price'] ?? 0);
+        $resolvedSellingPrice = $sellingPrice !== null ? $sellingPrice : (float)($product['base_price'] ?? 0);
+        $productName = (string)($product['name'] ?? $productId);
 
         // Upsert batch: if a batch with same branch/product/batch_number exists, update its quantity; otherwise insert
         $batchStmt = $pdo->prepare('SELECT id, quantity FROM drug_batches WHERE branch_id = ? AND product_id = ? AND batch_number = ? LIMIT 1');
         $batchStmt->execute([$branchId, $productId, $batchNumber]);
         $existingBatch = $batchStmt->fetch(PDO::FETCH_ASSOC);
 
+        $hasSupplierIdColumn = tableHasColumn('drug_batches', 'supplier_id');
+        $hasSupplierNameColumn = tableHasColumn('drug_batches', 'supplier_name');
+        $hasRestockStatusColumn = tableHasColumn('drug_batches', 'restock_status');
+        $hasLastRestockDateColumn = tableHasColumn('drug_batches', 'last_restock_date');
+
         if ($existingBatch) {
             $newQty = (int)$existingBatch['quantity'] + $quantity;
-            if ($supplierName !== null) {
-                $updateBatch = $pdo->prepare('UPDATE drug_batches SET quantity = ?, expiry_date = ?, status = ?, supplier_id = ?, supplier_name = ?, restock_status = ?, last_restock_date = ? WHERE id = ?');
-                $updateBatch->execute([$newQty, $expiryDate, 'ACTIVE', $supplierId, $supplierName, $restockStatus, $lastRestockDate, $existingBatch['id']]);
-            } else {
-                $updateBatch = $pdo->prepare('UPDATE drug_batches SET quantity = ?, expiry_date = ?, status = ?, restock_status = ?, last_restock_date = ? WHERE id = ?');
-                $updateBatch->execute([$newQty, $expiryDate, 'ACTIVE', $restockStatus, $lastRestockDate, $existingBatch['id']]);
+            $setParts = ['quantity = ?', 'expiry_date = ?', 'status = ?'];
+            $setParams = [$newQty, $expiryDate, 'ACTIVE'];
+
+            if ($hasSupplierIdColumn && $supplierId !== null && $supplierId !== '') {
+                $setParts[] = 'supplier_id = ?';
+                $setParams[] = $supplierId;
             }
+            if ($hasSupplierNameColumn && $supplierName !== null) {
+                $setParts[] = 'supplier_name = ?';
+                $setParams[] = $supplierName;
+            }
+            if ($hasRestockStatusColumn) {
+                $setParts[] = 'restock_status = ?';
+                $setParams[] = $restockStatus;
+            }
+            if ($hasLastRestockDateColumn) {
+                $setParts[] = 'last_restock_date = ?';
+                $setParams[] = $lastRestockDate;
+            }
+
+            $setParams[] = $existingBatch['id'];
+            $updateBatch = $pdo->prepare('UPDATE drug_batches SET ' . implode(', ', $setParts) . ' WHERE id = ?');
+            $updateBatch->execute($setParams);
         } else {
-            if ($supplierName !== null) {
-                $ins = $pdo->prepare("INSERT INTO drug_batches (branch_id, product_id, batch_number, expiry_date, quantity, status, supplier_id, supplier_name, restock_status, last_restock_date) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?)");
-                $ins->execute([$branchId, $productId, $batchNumber, $expiryDate, $quantity, $supplierId, $supplierName, $restockStatus, $lastRestockDate]);
-            } else {
-                $ins = $pdo->prepare("INSERT INTO drug_batches (branch_id, product_id, batch_number, expiry_date, quantity, status, restock_status, last_restock_date) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)");
-                $ins->execute([$branchId, $productId, $batchNumber, $expiryDate, $quantity, $restockStatus, $lastRestockDate]);
+            $insertColumns = ['branch_id', 'product_id', 'batch_number', 'expiry_date', 'quantity', 'status'];
+            $insertPlaceholders = ['?', '?', '?', '?', '?', "'ACTIVE'"];
+            $insertParams = [$branchId, $productId, $batchNumber, $expiryDate, $quantity];
+
+            if ($hasSupplierIdColumn && $supplierId !== null && $supplierId !== '') {
+                $insertColumns[] = 'supplier_id';
+                $insertPlaceholders[] = '?';
+                $insertParams[] = $supplierId;
             }
+            if ($hasSupplierNameColumn && $supplierName !== null) {
+                $insertColumns[] = 'supplier_name';
+                $insertPlaceholders[] = '?';
+                $insertParams[] = $supplierName;
+            }
+            if ($hasRestockStatusColumn) {
+                $insertColumns[] = 'restock_status';
+                $insertPlaceholders[] = '?';
+                $insertParams[] = $restockStatus;
+            }
+            if ($hasLastRestockDateColumn) {
+                $insertColumns[] = 'last_restock_date';
+                $insertPlaceholders[] = '?';
+                $insertParams[] = $lastRestockDate;
+            }
+
+            $ins = $pdo->prepare(
+                'INSERT INTO drug_batches (' . implode(', ', $insertColumns) . ') VALUES (' . implode(', ', $insertPlaceholders) . ')'
+            );
+            $ins->execute($insertParams);
         }
 
         // Update Total Quantity in branch_inventory (upsert)
         $stmt = $pdo->prepare("INSERT INTO branch_inventory (branch_id, product_id, quantity) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)");
         $stmt->execute([$branchId, $productId, $quantity]);
 
+        $invoiceId = generateNextRestockInvoiceNumber();
+        $invoiceItems = [[
+            'id' => $productId,
+            'name' => $productName,
+            'quantity' => $quantity,
+            'costPrice' => $resolvedCostPrice,
+            'price' => $resolvedSellingPrice,
+            'total' => $resolvedCostPrice * $quantity,
+            'batchNumber' => $batchNumber,
+            'expiryDate' => $expiryDate,
+            'supplierName' => $supplierName
+        ]];
+        $invoiceItemsJson = json_encode($invoiceItems);
+        if ($invoiceItemsJson === false) {
+            throw new Exception('Failed to encode restock invoice items');
+        }
+        $invoiceCustomerName = $supplierName ?: 'Inventory Restock';
+        $invoiceDescription = 'Restock Invoice - Product: ' . $productName . ' (Qty: ' . $quantity . ')' . ($batchNumber ? ' Batch: ' . $batchNumber : '');
+        $invoiceTotal = $resolvedCostPrice * $quantity;
+        insertRestockInvoice($invoiceId, $branchId, $invoiceCustomerName, $invoiceTotal, $invoiceDescription, $invoiceItemsJson);
+
         $pdo->commit();
-        echo json_encode(['message' => 'Stock added successfully']);
+        echo json_encode([
+            'message' => 'Stock added successfully',
+            'invoiceId' => $invoiceId,
+            'invoiceTotal' => $invoiceTotal
+        ]);
     } catch (Exception $e) {
         $pdo->rollBack();
         error_log('Failed to add stock: ' . $e->getMessage());
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+}
+
+function addStockBulk() {
+    global $pdo;
+
+    try {
+        $user = authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_CONTROLLER', 'STOREKEEPER']);
+        $input = json_decode(file_get_contents('php://input'), true);
+
+        if (!$input || !is_array($input)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid JSON payload']);
+            return;
+        }
+
+        $branchId = $input['branchId'] ?? '';
+        $items = $input['items'] ?? [];
+        $supplierId = $input['supplierId'] ?? null;
+        $supplierName = $input['supplierName'] ?? null;
+        $restockStatus = $input['restockStatus'] ?? 'RECEIVED';
+        $lastRestockDate = date('Y-m-d H:i:s');
+
+        if (empty($branchId) || !is_array($items) || count($items) === 0) {
+            http_response_code(400);
+            echo json_encode(['error' => 'branchId and non-empty items array are required']);
+            return;
+        }
+
+        $pdo->beginTransaction();
+
+        $hasSupplierIdColumn = tableHasColumn('drug_batches', 'supplier_id');
+        $hasSupplierNameColumn = tableHasColumn('drug_batches', 'supplier_name');
+        $hasRestockStatusColumn = tableHasColumn('drug_batches', 'restock_status');
+        $hasLastRestockDateColumn = tableHasColumn('drug_batches', 'last_restock_date');
+        $normalizedRole = strtoupper((string)($user['role'] ?? ''));
+
+        $invoiceItems = [];
+        $invoiceTotal = 0.0;
+        $processedCount = 0;
+
+        foreach ($items as $index => $item) {
+            $productId = $item['productId'] ?? '';
+            $quantity = (int)($item['quantity'] ?? 0);
+            $batchNumber = trim((string)($item['batchNumber'] ?? ''));
+            if ($batchNumber === '') {
+                $batchNumber = generateBatchNumber($index);
+            }
+            $expiryDate = $item['expiryDate'] ?? '';
+            $costPriceRaw = $item['costPrice'] ?? null;
+            $sellingPriceRaw = $item['sellingPrice'] ?? ($item['basePrice'] ?? null);
+            $costPrice = ($costPriceRaw === '' || $costPriceRaw === null) ? null : (float)$costPriceRaw;
+            $sellingPrice = ($sellingPriceRaw === '' || $sellingPriceRaw === null) ? null : (float)$sellingPriceRaw;
+            if ($normalizedRole === 'BRANCH_MANAGER') {
+                $costPrice = null;
+                $sellingPrice = null;
+            }
+
+            if (empty($productId) || $quantity <= 0) {
+                throw new Exception('Each item requires productId and quantity (>0)');
+            }
+            if ($costPrice !== null && $costPrice < 0) {
+                throw new Exception('costPrice cannot be negative');
+            }
+            if ($sellingPrice !== null && $sellingPrice < 0) {
+                throw new Exception('sellingPrice cannot be negative');
+            }
+
+            $productStmt = $pdo->prepare('SELECT id, name, cost_price, base_price FROM products WHERE id = ? LIMIT 1');
+            $productStmt->execute([$productId]);
+            $product = $productStmt->fetch(PDO::FETCH_ASSOC);
+            if (!$product) {
+                throw new Exception('Product not found: ' . $productId);
+            }
+
+            if ($costPrice !== null || $sellingPrice !== null) {
+                $priceSetParts = [];
+                $priceSetParams = [];
+                if ($costPrice !== null) {
+                    $priceSetParts[] = 'cost_price = ?';
+                    $priceSetParams[] = $costPrice;
+                }
+                if ($sellingPrice !== null) {
+                    $priceSetParts[] = 'base_price = ?';
+                    $priceSetParams[] = $sellingPrice;
+                }
+                $priceSetParams[] = $productId;
+                $updateProductPrices = $pdo->prepare('UPDATE products SET ' . implode(', ', $priceSetParts) . ' WHERE id = ?');
+                $updateProductPrices->execute($priceSetParams);
+            }
+
+            $resolvedCostPrice = $costPrice !== null ? $costPrice : (float)($product['cost_price'] ?? 0);
+            $resolvedSellingPrice = $sellingPrice !== null ? $sellingPrice : (float)($product['base_price'] ?? 0);
+            $productName = (string)($product['name'] ?? $productId);
+
+            $batchStmt = $pdo->prepare('SELECT id, quantity FROM drug_batches WHERE branch_id = ? AND product_id = ? AND batch_number = ? LIMIT 1');
+            $batchStmt->execute([$branchId, $productId, $batchNumber]);
+            $existingBatch = $batchStmt->fetch(PDO::FETCH_ASSOC);
+
+            if ($existingBatch) {
+                $newQty = (int)$existingBatch['quantity'] + $quantity;
+                $setParts = ['quantity = ?', 'expiry_date = ?', 'status = ?'];
+                $setParams = [$newQty, $expiryDate, 'ACTIVE'];
+
+                if ($hasSupplierIdColumn && $supplierId !== null && $supplierId !== '') {
+                    $setParts[] = 'supplier_id = ?';
+                    $setParams[] = $supplierId;
+                }
+                if ($hasSupplierNameColumn && $supplierName !== null) {
+                    $setParts[] = 'supplier_name = ?';
+                    $setParams[] = $supplierName;
+                }
+                if ($hasRestockStatusColumn) {
+                    $setParts[] = 'restock_status = ?';
+                    $setParams[] = $restockStatus;
+                }
+                if ($hasLastRestockDateColumn) {
+                    $setParts[] = 'last_restock_date = ?';
+                    $setParams[] = $lastRestockDate;
+                }
+
+                $setParams[] = $existingBatch['id'];
+                $updateBatch = $pdo->prepare('UPDATE drug_batches SET ' . implode(', ', $setParts) . ' WHERE id = ?');
+                $updateBatch->execute($setParams);
+            } else {
+                $insertColumns = ['branch_id', 'product_id', 'batch_number', 'expiry_date', 'quantity', 'status'];
+                $insertPlaceholders = ['?', '?', '?', '?', '?', "'ACTIVE'"];
+                $insertParams = [$branchId, $productId, $batchNumber, $expiryDate, $quantity];
+
+                if ($hasSupplierIdColumn && $supplierId !== null && $supplierId !== '') {
+                    $insertColumns[] = 'supplier_id';
+                    $insertPlaceholders[] = '?';
+                    $insertParams[] = $supplierId;
+                }
+                if ($hasSupplierNameColumn && $supplierName !== null) {
+                    $insertColumns[] = 'supplier_name';
+                    $insertPlaceholders[] = '?';
+                    $insertParams[] = $supplierName;
+                }
+                if ($hasRestockStatusColumn) {
+                    $insertColumns[] = 'restock_status';
+                    $insertPlaceholders[] = '?';
+                    $insertParams[] = $restockStatus;
+                }
+                if ($hasLastRestockDateColumn) {
+                    $insertColumns[] = 'last_restock_date';
+                    $insertPlaceholders[] = '?';
+                    $insertParams[] = $lastRestockDate;
+                }
+
+                $ins = $pdo->prepare(
+                    'INSERT INTO drug_batches (' . implode(', ', $insertColumns) . ') VALUES (' . implode(', ', $insertPlaceholders) . ')'
+                );
+                $ins->execute($insertParams);
+            }
+
+            $invUpsert = $pdo->prepare("INSERT INTO branch_inventory (branch_id, product_id, quantity) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)");
+            $invUpsert->execute([$branchId, $productId, $quantity]);
+
+            $lineTotal = $resolvedCostPrice * $quantity;
+            $invoiceTotal += $lineTotal;
+            $invoiceItems[] = [
+                'id' => $productId,
+                'name' => $productName,
+                'quantity' => $quantity,
+                'costPrice' => $resolvedCostPrice,
+                'price' => $resolvedSellingPrice,
+                'total' => $lineTotal,
+                'batchNumber' => $batchNumber,
+                'expiryDate' => $expiryDate,
+                'supplierName' => $supplierName
+            ];
+            $processedCount++;
+        }
+
+        if ($processedCount <= 0) {
+            throw new Exception('No valid items were processed');
+        }
+
+        $invoiceId = generateNextRestockInvoiceNumber();
+        $invoiceItemsJson = json_encode($invoiceItems);
+        if ($invoiceItemsJson === false) {
+            throw new Exception('Failed to encode restock invoice items');
+        }
+        $invoiceCustomerName = $supplierName ?: 'Inventory Restock';
+        $invoiceDescription = 'Restock Invoice - ' . $processedCount . ' product(s)';
+        insertRestockInvoice($invoiceId, $branchId, $invoiceCustomerName, $invoiceTotal, $invoiceDescription, $invoiceItemsJson);
+
+        $pdo->commit();
+        echo json_encode([
+            'message' => 'Stock added successfully',
+            'invoiceId' => $invoiceId,
+            'invoiceTotal' => $invoiceTotal,
+            'itemsCount' => $processedCount
+        ]);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        error_log('Failed to add stock in bulk: ' . $e->getMessage());
         http_response_code(500);
         echo json_encode(['error' => $e->getMessage()]);
     }
@@ -482,40 +1153,25 @@ function getTransfers() {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'DISPENSER', 'PHARMACIST', 'STOREKEEPER']);
-        $stmt = $pdo->query("SELECT * FROM stock_transfers ORDER BY date_sent DESC LIMIT 100");
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'DISPENSER', 'PHARMACIST', 'STOREKEEPER', 'AUDITOR']);
+        $canJoinStorekeeper = tableHasColumn('stock_transfers', 'storekeeper_verified_by');
+        $canJoinController = tableHasColumn('stock_transfers', 'controller_verified_by');
+        $storekeeperJoin = $canJoinStorekeeper ? 'LEFT JOIN staff sk ON sk.id = t.storekeeper_verified_by' : '';
+        $controllerJoin = $canJoinController ? 'LEFT JOIN staff ic ON ic.id = t.controller_verified_by' : '';
+        $storekeeperName = $canJoinStorekeeper ? 'sk.name AS storekeeper_name' : 'NULL AS storekeeper_name';
+        $controllerName = $canJoinController ? 'ic.name AS controller_name' : 'NULL AS controller_name';
+        $stmt = $pdo->query("
+            SELECT t.*,
+                   $storekeeperName,
+                   $controllerName
+            FROM stock_transfers t
+            $storekeeperJoin
+            $controllerJoin
+            ORDER BY COALESCE(t.date_sent, t.created_at) DESC
+            LIMIT 500
+        ");
         $rawTransfers = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-        // Transform database fields to match frontend interface
-        $transfers = array_map(function($transfer) {
-            $products = json_decode($transfer['products'], true);
-            if ($products === null) {
-                $products = [];
-            }
-
-            // Transform items to match TransferItem interface
-            $items = array_map(function($product) {
-                return [
-                    'productId' => $product['productId'] ?? '',
-                    'productName' => $product['productName'] ?? '',
-                    'quantity' => (int)($product['quantity'] ?? 0),
-                    'batchNumber' => $product['batchNumber'] ?? '',
-                    'expiryDate' => $product['expiryDate'] ?? ''
-                ];
-            }, $products);
-
-            return [
-                'id' => $transfer['id'],
-                'sourceBranchId' => $transfer['from_branch_id'],
-                'targetBranchId' => $transfer['to_branch_id'],
-                'dateSent' => $transfer['date_sent'],
-                'dateReceived' => $transfer['date_received'],
-                'items' => $items,
-                'status' => $transfer['status'],
-                'notes' => $transfer['notes'],
-                'createdBy' => $transfer['created_by']
-            ];
-        }, $rawTransfers);
+        $transfers = array_map('transformTransferRow', $rawTransfers);
 
         echo json_encode($transfers);
     } catch (Exception $e) {
@@ -573,8 +1229,8 @@ function createTransfer() {
         $itemsJson = json_encode($items);
         $createdBy = getCurrentUser()['id'] ?? null;
 
-            // Generate transfer id (stock_transfers.id is a varchar primary key)
-            $transferId = 'TRANSFER-' . str_replace('.', '', uniqid('', true));
+            // Generate transfer id as 4-digit incrementing sequence: 0001, 0002, ...
+            $transferId = nextTransferSequenceId();
 
             // Insert transfer (include id explicitly)
             $stmt = $pdo->prepare("
@@ -655,14 +1311,12 @@ function verifyTransferByStoreKeeper($id) {
     global $pdo;
 
     try {
-        authorizeRoles(['STOREKEEPER', 'INVENTORY_CONTROLLER', 'BRANCH_MANAGER', 'SUPER_ADMIN']);
+        // Step 1: physical receipt must be done by Storekeeper (or Super Admin override).
+        authorizeRoles(['STOREKEEPER', 'SUPER_ADMIN']);
 
         $user = getCurrentUser();
 
-        // Get the transfer details
-        $stmt = $pdo->prepare('SELECT * FROM stock_transfers WHERE id = ?');
-        $stmt->execute([$id]);
-        $transfer = $stmt->fetch();
+        $transfer = getTransferByIdDetailed($id);
 
         if (!$transfer) {
             http_response_code(404);
@@ -670,82 +1324,80 @@ function verifyTransferByStoreKeeper($id) {
             return;
         }
 
-        if ($transfer['status'] !== 'IN_TRANSIT') {
+        $currentStatus = strtoupper((string)($transfer['status'] ?? ''));
+        $storeKeeperVerified = !empty($transfer['storekeeper_verified'])
+            || !empty($transfer['storekeeper_verified_by'])
+            || !empty($transfer['storekeeper_verified_at']);
+        // Idempotent behavior.
+        if ($currentStatus === 'COMPLETED') {
+            $existing = transformTransferRow($transfer);
+            $existing['message'] = 'Transfer already fully verified';
+            echo json_encode($existing);
+            return;
+        }
+        if ($storeKeeperVerified) {
+            $existing = transformTransferRow($transfer);
+            $existing['message'] = 'Transfer already verified by storekeeper';
+            echo json_encode($existing);
+            return;
+        }
+
+        // Accept common pre-receipt states before storekeeper confirmation.
+        if (!in_array($currentStatus, ['IN_TRANSIT', 'PENDING', 'APPROVED', 'RECEIVED_KEEPER'], true)) {
             http_response_code(400);
-            echo json_encode(['error' => 'Transfer is not in transit']);
+            echo json_encode(['error' => 'Transfer is not ready for storekeeper verification']);
             return;
         }
 
         // Complete the transfer directly (simplified process)
         $pdo->beginTransaction();
 
-        // Update transfer status
-        $stmt = $pdo->prepare('UPDATE stock_transfers SET status = ?, date_received = NOW() WHERE id = ?');
-        $stmt->execute(['COMPLETED', $id]);
-
-        // Move stock from source to target branch
-        $products = json_decode($transfer['products'], true);
-        foreach ($products as $item) {
-            // Deduct from source branch
-            $stmt = $pdo->prepare('UPDATE branch_inventory SET quantity = GREATEST(0, quantity - ?) WHERE branch_id = ? AND product_id = ?');
-            $stmt->execute([$item['quantity'], $transfer['from_branch_id'], $item['productId']]);
-
-            // Add to target branch
-            $stmt = $pdo->prepare("
-                INSERT INTO branch_inventory (branch_id, product_id, quantity)
-                VALUES (?, ?, ?)
-                ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)
-            ");
-            $stmt->execute([$transfer['to_branch_id'], $item['productId'], $item['quantity']]);
-
-            // Move batches from source to target
-            if (isset($item['batchNumber'])) {
-                $stmt = $pdo->prepare('UPDATE drug_batches SET branch_id = ? WHERE branch_id = ? AND product_id = ? AND batch_number = ?');
-                $stmt->execute([$transfer['to_branch_id'], $transfer['from_branch_id'], $item['productId'], $item['batchNumber']]);
-            }
+        // Step 1 verification. Persist as RECEIVED_KEEPER so status survives reloads
+        // even on older schemas without explicit verification columns.
+        $nextStatus = enumColumnAllowsValue('stock_transfers', 'status', 'RECEIVED_KEEPER')
+            ? 'RECEIVED_KEEPER'
+            : 'IN_TRANSIT';
+        $setParts = ['status = ?'];
+        $params = [$nextStatus];
+        if (tableHasColumn('stock_transfers', 'storekeeper_verified')) {
+            $setParts[] = 'storekeeper_verified = 1';
         }
+        if (tableHasColumn('stock_transfers', 'storekeeper_verified_by')) {
+            $setParts[] = 'storekeeper_verified_by = ?';
+            $params[] = $user['id'] ?? null;
+        }
+        if (tableHasColumn('stock_transfers', 'storekeeper_verified_at')) {
+            $setParts[] = 'storekeeper_verified_at = NOW()';
+        }
+        if (tableHasColumn('stock_transfers', 'date_received')) {
+            $setParts[] = 'date_received = COALESCE(date_received, NOW())';
+        }
+        $params[] = $id;
+        $stmt = $pdo->prepare('UPDATE stock_transfers SET ' . implode(', ', $setParts) . ' WHERE id = ?');
+        $stmt->execute($params);
+
+        // Keep shipment workflow in sync so status is persisted and visible after reload.
+        $shipmentStmt = $pdo->prepare('
+            UPDATE shipments
+            SET status = CASE
+                WHEN status IN (\'PENDING\', \'APPROVED\') THEN \'IN_TRANSIT\'
+                ELSE status
+            END
+            WHERE transfer_id = ?
+        ');
+        $shipmentStmt->execute([$id]);
 
         $pdo->commit();
 
-        // Return updated transfer data
-        $stmt = $pdo->prepare('SELECT * FROM stock_transfers WHERE id = ?');
-        $stmt->execute([$id]);
-        $updatedTransfer = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        // Transform to match frontend interface
-        $products = json_decode($updatedTransfer['products'], true);
-        if ($products === null) {
-            $products = [];
-        }
-
-        $items = array_map(function($product) {
-            return [
-                'productId' => $product['productId'] ?? '',
-                'productName' => $product['productName'] ?? '',
-                'quantity' => (int)($product['quantity'] ?? 0),
-                'batchNumber' => $product['batchNumber'] ?? '',
-                'expiryDate' => $product['expiryDate'] ?? ''
-            ];
-        }, $products);
-
-        $transformedTransfer = [
-            'id' => $updatedTransfer['id'],
-            'sourceBranchId' => $updatedTransfer['from_branch_id'],
-            'targetBranchId' => $updatedTransfer['to_branch_id'],
-            'dateSent' => $updatedTransfer['date_sent'],
-            'dateReceived' => $updatedTransfer['date_received'],
-            'items' => $items,
-            'status' => $updatedTransfer['status'],
-            'notes' => $updatedTransfer['notes'],
-            'createdBy' => $updatedTransfer['created_by']
-        ];
-
-        echo json_encode($transformedTransfer);
+        $updatedTransfer = getTransferByIdDetailed($id);
+        echo json_encode($updatedTransfer ? transformTransferRow($updatedTransfer) : ['message' => 'Verified']);
     } catch (Exception $e) {
-        $pdo->rollBack();
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
         error_log('Failed to verify transfer by store keeper: ' . $e->getMessage());
         http_response_code(500);
-        echo json_encode(['error' => 'Failed to complete transfer']);
+        echo json_encode(['error' => 'Failed to verify transfer']);
     }
 }
 
@@ -753,14 +1405,11 @@ function verifyTransferByController($id) {
     global $pdo;
 
     try {
-        authorizeRoles(['INVENTORY_CONTROLLER', 'BRANCH_MANAGER', 'SUPER_ADMIN']);
+        authorizeRoles(['INVENTORY_CONTROLLER', 'SUPER_ADMIN']);
 
         $user = getCurrentUser();
 
-        // Get the transfer details
-        $stmt = $pdo->prepare('SELECT * FROM stock_transfers WHERE id = ?');
-        $stmt->execute([$id]);
-        $transfer = $stmt->fetch();
+        $transfer = getTransferByIdDetailed($id);
 
         if (!$transfer) {
             http_response_code(404);
@@ -768,82 +1417,176 @@ function verifyTransferByController($id) {
             return;
         }
 
-        if ($transfer['status'] !== 'IN_TRANSIT') {
-            http_response_code(400);
-            echo json_encode(['error' => 'Transfer is not in transit']);
+        $currentStatus = strtoupper((string)($transfer['status'] ?? ''));
+        $storeKeeperVerified = !empty($transfer['storekeeper_verified'])
+            || !empty($transfer['storekeeper_verified_by'])
+            || !empty($transfer['storekeeper_verified_at']);
+
+        // Idempotent behavior: if already completed by controller, return success.
+        if ($currentStatus === 'COMPLETED') {
+            $existing = transformTransferRow($transfer);
+            $existing['message'] = 'Transfer already verified by controller';
+            echo json_encode($existing);
             return;
         }
 
-        // Complete the transfer directly (simplified process)
+        if (!$storeKeeperVerified && $currentStatus !== 'RECEIVED_KEEPER') {
+            http_response_code(400);
+            echo json_encode(['error' => 'Transfer must be verified by store keeper first']);
+            return;
+        }
+
         $pdo->beginTransaction();
 
-        // Update transfer status
-        $stmt = $pdo->prepare('UPDATE stock_transfers SET status = ?, date_received = NOW() WHERE id = ?');
-        $stmt->execute(['COMPLETED', $id]);
+        $setParts = ['status = ?'];
+        $params = ['COMPLETED'];
+        if (tableHasColumn('stock_transfers', 'controller_verified')) {
+            $setParts[] = 'controller_verified = 1';
+        }
+        if (tableHasColumn('stock_transfers', 'controller_verified_by')) {
+            $setParts[] = 'controller_verified_by = ?';
+            $params[] = $user['id'] ?? null;
+        }
+        if (tableHasColumn('stock_transfers', 'controller_verified_at')) {
+            $setParts[] = 'controller_verified_at = NOW()';
+        }
+        $params[] = $id;
+        $stmt = $pdo->prepare('UPDATE stock_transfers SET ' . implode(', ', $setParts) . ' WHERE id = ?');
+        $stmt->execute($params);
 
-        // Move stock from source to target branch
-        $products = json_decode($transfer['products'], true);
+        // Controller verification finalizes receipt into destination inventory.
+        $products = json_decode((string)($transfer['products'] ?? '[]'), true);
+        if (!is_array($products)) {
+            $products = [];
+        }
+
         foreach ($products as $item) {
-            // Deduct from source branch
-            $stmt = $pdo->prepare('UPDATE branch_inventory SET quantity = GREATEST(0, quantity - ?) WHERE branch_id = ? AND product_id = ?');
-            $stmt->execute([$item['quantity'], $transfer['from_branch_id'], $item['productId']]);
+            $productId = (string)($item['productId'] ?? '');
+            $qty = (int)($item['quantity'] ?? 0);
+            if ($productId === '' || $qty <= 0) {
+                continue;
+            }
 
-            // Add to target branch
-            $stmt = $pdo->prepare("
+            $upsertInventory = $pdo->prepare("
                 INSERT INTO branch_inventory (branch_id, product_id, quantity)
                 VALUES (?, ?, ?)
                 ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)
             ");
-            $stmt->execute([$transfer['to_branch_id'], $item['productId'], $item['quantity']]);
+            $upsertInventory->execute([$transfer['to_branch_id'], $productId, $qty]);
 
-            // Move batches from source to target
-            if (isset($item['batchNumber'])) {
-                $stmt = $pdo->prepare('UPDATE drug_batches SET branch_id = ? WHERE branch_id = ? AND product_id = ? AND batch_number = ?');
-                $stmt->execute([$transfer['to_branch_id'], $transfer['from_branch_id'], $item['productId'], $item['batchNumber']]);
+            // Keep batch records aligned with the receiving branch when batch details exist.
+            $batchNumber = (string)($item['batchNumber'] ?? '');
+            if ($batchNumber !== '') {
+                $moveBatch = $pdo->prepare('
+                    UPDATE drug_batches
+                    SET branch_id = ?
+                    WHERE branch_id = ? AND product_id = ? AND batch_number = ?
+                ');
+                $moveBatch->execute([$transfer['to_branch_id'], $transfer['from_branch_id'], $productId, $batchNumber]);
             }
         }
 
+        // Mark linked shipment as delivered so Manage Shipments reflects final step persistently.
+        $shipmentStmt = $pdo->prepare('
+            UPDATE shipments
+            SET status = ?,
+                approved_at = COALESCE(approved_at, NOW())
+            WHERE transfer_id = ?
+        ');
+        $shipmentStmt->execute(['DELIVERED', $id]);
+
         $pdo->commit();
 
-        // Return updated transfer data
-        $stmt = $pdo->prepare('SELECT * FROM stock_transfers WHERE id = ?');
-        $stmt->execute([$id]);
-        $updatedTransfer = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        // Transform to match frontend interface
-        $products = json_decode($updatedTransfer['products'], true);
-        if ($products === null) {
-            $products = [];
-        }
-
-        $items = array_map(function($product) {
-            return [
-                'productId' => $product['productId'] ?? '',
-                'productName' => $product['productName'] ?? '',
-                'quantity' => (int)($product['quantity'] ?? 0),
-                'batchNumber' => $product['batchNumber'] ?? '',
-                'expiryDate' => $product['expiryDate'] ?? ''
-            ];
-        }, $products);
-
-        $transformedTransfer = [
-            'id' => $updatedTransfer['id'],
-            'sourceBranchId' => $updatedTransfer['from_branch_id'],
-            'targetBranchId' => $updatedTransfer['to_branch_id'],
-            'dateSent' => $updatedTransfer['date_sent'],
-            'dateReceived' => $updatedTransfer['date_received'],
-            'items' => $items,
-            'status' => $updatedTransfer['status'],
-            'notes' => $updatedTransfer['notes'],
-            'createdBy' => $updatedTransfer['created_by']
-        ];
-
-        echo json_encode($transformedTransfer);
+        $updatedTransfer = getTransferByIdDetailed($id);
+        echo json_encode($updatedTransfer ? transformTransferRow($updatedTransfer) : ['message' => 'Verified']);
     } catch (Exception $e) {
-        $pdo->rollBack();
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
         error_log('Failed to verify transfer by controller: ' . $e->getMessage());
         http_response_code(500);
-        echo json_encode(['error' => 'Failed to complete transfer']);
+        echo json_encode(['error' => 'Failed to verify transfer']);
+    }
+}
+
+function rejectTransfer($id) {
+    global $pdo;
+
+    try {
+        authorizeRoles(['STOREKEEPER', 'INVENTORY_CONTROLLER', 'SUPER_ADMIN']);
+        $user = getCurrentUser();
+        $input = json_decode(file_get_contents('php://input'), true) ?? [];
+        $step = strtoupper((string)($input['step'] ?? ''));
+        $reason = trim((string)($input['reason'] ?? ''));
+
+        $transfer = getTransferByIdDetailed($id);
+        if (!$transfer) {
+            http_response_code(404);
+            echo json_encode(['error' => 'Transfer not found']);
+            return;
+        }
+
+        $currentStatus = strtoupper((string)($transfer['status'] ?? ''));
+        if ($currentStatus === 'COMPLETED') {
+            http_response_code(400);
+            echo json_encode(['error' => 'Completed transfer cannot be rejected']);
+            return;
+        }
+        if ($currentStatus === 'REJECTED') {
+            $existing = transformTransferRow($transfer);
+            $existing['message'] = 'Transfer already rejected';
+            echo json_encode($existing);
+            return;
+        }
+
+        if (!ensureEnumColumnValue('stock_transfers', 'status', 'REJECTED')) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Transfer status does not support REJECTED']);
+            return;
+        }
+
+        $role = strtoupper((string)($user['role'] ?? ''));
+        $isKeeperRole = in_array($role, ['STOREKEEPER', 'SUPER_ADMIN'], true);
+        $isControllerRole = in_array($role, ['INVENTORY_CONTROLLER', 'SUPER_ADMIN'], true);
+        if ($step === 'KEEPER' && !$isKeeperRole) {
+            http_response_code(403);
+            echo json_encode(['error' => 'Not authorized to reject at storekeeper level']);
+            return;
+        }
+        if ($step === 'CONTROLLER' && !$isControllerRole) {
+            http_response_code(403);
+            echo json_encode(['error' => 'Not authorized to reject at controller level']);
+            return;
+        }
+
+        $pdo->beginTransaction();
+
+        $noteParts = [];
+        if ($step !== '') $noteParts[] = $step;
+        $noteParts[] = 'rejected';
+        $noteParts[] = 'by ' . ($user['id'] ?? 'unknown');
+        if ($reason !== '') $noteParts[] = 'reason: ' . $reason;
+        $rejectionNote = '[' . implode(' | ', $noteParts) . ']';
+        $updatedNotes = trim((string)($transfer['notes'] ?? ''));
+        $updatedNotes = $updatedNotes === '' ? $rejectionNote : ($updatedNotes . ' ' . $rejectionNote);
+
+        $stmt = $pdo->prepare('UPDATE stock_transfers SET status = ?, notes = ? WHERE id = ?');
+        $stmt->execute(['REJECTED', $updatedNotes, $id]);
+
+        $shipmentStmt = $pdo->prepare('UPDATE shipments SET status = ? WHERE transfer_id = ?');
+        $shipmentStmt->execute(['REJECTED', $id]);
+
+        $pdo->commit();
+
+        $updatedTransfer = getTransferByIdDetailed($id);
+        echo json_encode($updatedTransfer ? transformTransferRow($updatedTransfer) : ['message' => 'Rejected']);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        error_log('Failed to reject transfer: ' . $e->getMessage());
+        http_response_code(500);
+        echo json_encode(['error' => 'Failed to reject transfer']);
     }
 }
 
@@ -851,7 +1594,7 @@ function approveTransfer($id) {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_CONTROLLER']);
+        authorizeRoles(['SUPER_ADMIN', 'INVENTORY_CONTROLLER']);
 
         $pdo->beginTransaction();
 
@@ -948,8 +1691,18 @@ function updateInventoryItem($branchId, $productId) {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_CONTROLLER']);
+        $user = authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_CONTROLLER']);
         $input = json_decode(file_get_contents('php://input'), true);
+        $normalizedRole = strtoupper((string)($user['role'] ?? ''));
+
+        if (
+            $normalizedRole === 'BRANCH_MANAGER' &&
+            (isset($input['customPrice']) || isset($input['costPrice']) || isset($input['basePrice']))
+        ) {
+            http_response_code(403);
+            echo json_encode(['error' => 'Branch managers cannot update buying or selling prices in inventory']);
+            return;
+        }
 
         $pdo->beginTransaction();
 

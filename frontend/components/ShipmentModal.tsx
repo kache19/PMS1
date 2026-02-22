@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { X, Truck, Package, AlertCircle, CheckCircle, XCircle } from 'lucide-react';
 import { api } from '../services/api';
 import type { Branch } from '../types';
+import { getBranchDisplayName } from '../utils/branchDisplay';
+import { generateBatchNumber } from '../utils/batchNumber';
 
 interface ShipmentItem {
   productId: string;
@@ -69,7 +71,7 @@ const ShipmentModal: React.FC<ShipmentModalProps> = ({
       const initialItems = requisition.items.map(item => ({
         ...item,
         quantity: item.requestedQty,
-        batchNumber: `BATCH-${Date.now()}-${item.productId.slice(-4)}`,
+        batchNumber: generateBatchNumber(),
         expiryDate: expiryDate,
         headOfficeStock: 0
       }));
@@ -241,7 +243,7 @@ const ShipmentModal: React.FC<ShipmentModalProps> = ({
   };
 
   const totalQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
-  const branchName = branches.find(b => b.id === selectedBranch)?.name || 'Unknown';
+  const branchName = getBranchDisplayName(branches, selectedBranch, 'Unknown');
 
   if (!isOpen || !requisition) return null;
 
@@ -325,7 +327,7 @@ const ShipmentModal: React.FC<ShipmentModalProps> = ({
                 >
                   {branches.map(branch => (
                     <option key={branch.id} value={branch.id}>
-                      {branch.name}
+                      {getBranchDisplayName(branches, branch.id, branch.name)}
                     </option>
                   ))}
                 </select>
@@ -430,7 +432,7 @@ const ShipmentModal: React.FC<ShipmentModalProps> = ({
                 </div>
                 <div className="text-right">
                   <p className="text-sm text-teal-700">Destination</p>
-                  <p className="font-bold text-teal-800">{branches.find(b => b.id === selectedBranch)?.name || 'Unknown'}</p>
+                  <p className="font-bold text-teal-800">{getBranchDisplayName(branches, selectedBranch, 'Unknown')}</p>
                 </div>
               </div>
             </div>
@@ -477,7 +479,7 @@ const ShipmentModal: React.FC<ShipmentModalProps> = ({
             <h3 className="text-lg font-bold text-slate-800 mb-4">Confirm Shipment</h3>
             <div className="space-y-3 mb-6">
               <p className="text-slate-600">
-                Are you sure you want to initiate this shipment to <span className="font-bold">{branches.find(b => b.id === selectedBranch)?.name || 'Unknown'}</span>?
+                Are you sure you want to initiate this shipment to <span className="font-bold">{getBranchDisplayName(branches, selectedBranch, 'Unknown')}</span>?
               </p>
               <div className="bg-slate-50 rounded-lg p-3 space-y-2">
                 <p className="text-sm text-slate-600"><span className="font-semibold">Total Items:</span> {items.reduce((sum, item) => sum + item.quantity, 0)} units</p>

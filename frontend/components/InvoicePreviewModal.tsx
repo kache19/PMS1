@@ -147,7 +147,7 @@ const InvoicePreviewModal: React.FC<InvoicePreviewModalProps> = ({
             {/* Totals */}
             <div className="flex justify-end">
               <div className="w-64 space-y-2">
-                {selectedInvoice.includeVAT ? (
+                {Boolean(selectedInvoice.includeVAT) ? (
                   <>
                     <div className="flex justify-between text-slate-500">
                       <span>Subtotal:</span>
@@ -293,7 +293,7 @@ const InvoicePreviewModal: React.FC<InvoicePreviewModalProps> = ({
           <hr className="border-black my-6" />
           <div className="flex justify-end">
             <div className="w-80 space-y-3 text-sm">
-              {selectedInvoice.includeVAT ? (
+              {Boolean(selectedInvoice.includeVAT) ? (
                 <>
                   <div className="flex justify-between">
                     <span>Subtotal:</span>

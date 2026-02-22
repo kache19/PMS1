@@ -41,8 +41,10 @@ function getLoginTrackers() {
         $userRole = $user['role'] ?? '';
         $userBranchId = $user['branch_id'] ?? null;
         
-        // Authorization: SUPER_ADMIN can see all, others see their branch only
-        if ($userRole !== 'SUPER_ADMIN' && $userRole !== 'BRANCH_MANAGER') {
+        $roleKey = strtoupper((string)$userRole);
+
+        // Authorization: SUPER_ADMIN and AUDITOR can see all, BRANCH_MANAGER sees branch scope.
+        if ($roleKey !== 'SUPER_ADMIN' && $roleKey !== 'BRANCH_MANAGER' && $roleKey !== 'AUDITOR') {
             http_response_code(403);
             echo json_encode(['error' => 'Unauthorized to view login trackers']);
             return;
@@ -60,7 +62,7 @@ function getLoginTrackers() {
         if ($branchFilter) {
             $query .= ' AND branch_id = ?';
             $params[] = $branchFilter;
-        } elseif ($userRole === 'BRANCH_MANAGER') {
+        } elseif ($roleKey === 'BRANCH_MANAGER') {
             // Branch managers see only their branch's logins
             $query .= ' AND branch_id = ?';
             $params[] = $userBranchId;

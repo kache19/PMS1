@@ -1,7 +1,7 @@
 import React, { useMemo, useEffect, useState } from 'react';
 import { 
-  LineChart,
-  Line, 
+  BarChart,
+  Bar, 
   XAxis, 
   YAxis, 
   CartesianGrid, 
@@ -9,13 +9,13 @@ import {
   ResponsiveContainer,
   PieChart,
   Pie,
-  Cell,
-  AreaChart,
-  Area
+  Cell
 } from 'recharts';
 import { TrendingUp, AlertTriangle, DollarSign, Users, Store } from 'lucide-react';
 import { api } from '../services/api';
 import { BranchInventoryItem, Sale, Expense, Branch, Product } from '../types';
+import { getBranchDisplayName } from '../utils/branchDisplay';
+import { runWithPreservedWindowScroll } from '../utils/scrollStability';
 
 const COLORS = ['#0f766e', '#14b8a6', '#5eead4', '#ccfbf1'];
 
@@ -52,9 +52,12 @@ interface DashboardProps {
 
 const Dashboard: React.FC<DashboardProps> = ({ currentBranchId, inventory, sales: initialSales, expenses: initialExpenses, onViewInventory, onCreateRequisition }) => {
       const handleReorder = (productName: string, branchId: string) => {
+        const headOffice = branches.find((b) => b.isHeadOffice);
+        const headOfficeId = headOffice?.id || 'HEAD_OFFICE';
+        const headOfficeName = headOffice ? getBranchDisplayName(branches, headOffice.id, headOffice.name) : 'Head Office 👑';
         // Show reorder confirmation or navigate to create requisition
         const confirmed = window.confirm(
-          `Create a reorder request for "${productName}" to ${branches.find(b => b.id === branchId)?.name || branchId}?`
+          `Create a reorder request for "${productName}" to ${headOfficeName}?`
         );
     
         if (confirmed && onCreateRequisition) {
@@ -64,6 +67,7 @@ const Dashboard: React.FC<DashboardProps> = ({ currentBranchId, inventory, sales
             const requisition = {
               id: `REQ-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
               branchId: branchId,
+              targetBranchId: headOfficeId,
               requestDate: new Date().toISOString().split('T')[0],
               requestedBy: 'SYSTEM',
               status: 'PENDING' as const,
@@ -106,7 +110,9 @@ const Dashboard: React.FC<DashboardProps> = ({ currentBranchId, inventory, sales
 
     // Branch info
     const currentBranch = branches.find(b => b.id === currentBranchId);
-    const activeBranchName = currentBranch?.name || 'Unknown';
+    const activeBranchName = currentBranch
+      ? getBranchDisplayName(branches, currentBranch.id, currentBranch.name)
+      : 'Unknown';
     const activeBranchLocation = currentBranch?.location || '';
     const isHeadOffice = currentBranch?.isHeadOffice || false;
 
@@ -129,7 +135,9 @@ const Dashboard: React.FC<DashboardProps> = ({ currentBranchId, inventory, sales
       fetchRealTimeData();
 
       // Set up interval for real-time updates (every 30 seconds)
-      const interval = setInterval(fetchRealTimeData, 30000);
+      const interval = setInterval(() => {
+        void runWithPreservedWindowScroll(() => fetchRealTimeData());
+      }, 30000);
 
       return () => clearInterval(interval);
     }, []);
@@ -199,7 +207,7 @@ const Dashboard: React.FC<DashboardProps> = ({ currentBranchId, inventory, sales
       });
 
       return Object.entries(branchRevenueMap).map(([bId, val]) => ({
-          name: branches.find(b => b.id === bId)?.name || bId,
+          name: getBranchDisplayName(branches, bId, bId),
           value: val
       }));
   }, [sales, isHeadOffice, branches]);
@@ -207,7 +215,7 @@ const Dashboard: React.FC<DashboardProps> = ({ currentBranchId, inventory, sales
 
   // DYNAMIC STOCK ALERTS - Check products only for the active branch (including head office)
   let lowStockCount = 0;
-  const criticalItems: {name: string, stock: number, branch: string}[] = [];
+  const criticalItems: {name: string, stock: number, branch: string; branchId: string}[] = [];
   const branchesToCheck = [currentBranchId];
 
   branchesToCheck.forEach(bId => {
@@ -232,7 +240,8 @@ const Dashboard: React.FC<DashboardProps> = ({ currentBranchId, inventory, sales
                   criticalItems.push({
                       name: productDef.name,
                       stock: totalAvailableStock,
-                      branch: branches.find(b => b.id === bId)?.name || bId
+                      branch: getBranchDisplayName(branches, bId, String(bId)),
+                      branchId: String(bId)
                   });
               }
           }
@@ -294,13 +303,7 @@ const Dashboard: React.FC<DashboardProps> = ({ currentBranchId, inventory, sales
           </h3>
           <div className="h-48 md:h-64 lg:h-80 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#0d9488" stopOpacity={0.1}/>
-                    <stop offset="95%" stopColor="#0d9488" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
+              <BarChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                 <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} dy={10} />
                 <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} tickFormatter={(value) => `${value/1000}k`} />
@@ -309,8 +312,8 @@ const Dashboard: React.FC<DashboardProps> = ({ currentBranchId, inventory, sales
                     itemStyle={{ color: '#0f766e', fontWeight: 600 }}
                     formatter={(value: number) => [`TZS ${value.toLocaleString()}`, 'Revenue']}
                 />
-                <Area type="monotone" dataKey="revenue" stroke="#0d9488" fillOpacity={1} fill="url(#colorRevenue)" strokeWidth={3} />
-              </AreaChart>
+                <Bar dataKey="revenue" fill="#0d9488" radius={[6, 6, 0, 0]} />
+              </BarChart>
             </ResponsiveContainer>
           </div>
         </div>
@@ -403,7 +406,7 @@ const Dashboard: React.FC<DashboardProps> = ({ currentBranchId, inventory, sales
                       <td className="px-2 md:px-4 py-2 md:py-3 hidden md:table-cell"><span className="text-xs bg-red-100 text-red-700 px-1 md:px-2 py-0.5 md:py-1 rounded font-bold">OUT</span></td>
                       <td className="px-2 md:px-4 py-2 md:py-3">
                         <button
-                          onClick={() => handleReorder(item.name, branches.find(b => b.name === item.branch)?.id || currentBranchId)}
+                          onClick={() => handleReorder(item.name, item.branchId || currentBranchId)}
                           className="text-teal-600 hover:text-teal-800 hover:underline font-medium cursor-pointer transition-colors text-xs md:text-sm"
                         >
                           Reorder

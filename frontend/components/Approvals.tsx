@@ -17,7 +17,9 @@ import {
 import { api } from "../services/api";
 import { useNotifications } from "./NotificationContext";
 import ShipmentModal from "./ShipmentModal";
-import type { Branch, Expense, StockTransfer, Product } from "../types";
+import type { Branch, Expense, StockTransfer, Product, DisposalRequest } from "../types";
+import { getBranchDisplayName as formatBranchName } from '../utils/branchDisplay';
+import { runWithPreservedWindowScroll } from '../utils/scrollStability';
 
 // Type Definitions
 interface StockRequisition {
@@ -46,21 +48,6 @@ interface StockReleaseRequest {
     productId: string;
     batchNumber: string;
     quantity: number;
-  }[];
-}
-
-interface DisposalRequest {
-  id: string;
-  branchId: string;
-  date: string;
-  requestedBy: string;
-  status: 'PENDING' | 'APPROVED' | 'REJECTED';
-  items: {
-    productName: string;
-    productId: string;
-    batchNumber: string;
-    quantity: number;
-    reason: 'EXPIRED' | 'DAMAGED' | 'OBSOLETE' | 'OTHER';
   }[];
 }
 
@@ -147,7 +134,9 @@ const Approvals: React.FC<ApprovalsProps> = ({
 
     // Set up polling every 30 seconds
     const interval = setInterval(() => {
-      if (mounted) loadApprovalData();
+      if (mounted) {
+        void runWithPreservedWindowScroll(() => loadApprovalData());
+      }
     }, 30000);
 
     return () => {
@@ -171,17 +160,8 @@ const Approvals: React.FC<ApprovalsProps> = ({
     try { return new Date(v).toLocaleDateString(); } catch { return v; }
   };
 
-  const getBranchDisplayName = (branchId?: string) => {
-    if (!branchId) return 'Unknown';
-    const found = branches.find(b => b.id === branchId);
-    if (found) return found.name;
-    // Special case: if admin (SUPER_ADMIN) is not at head office, show the branch marked as main/head office
-    const main = branches.find(b => b.isHeadOffice);
-    if (branchId === 'HEAD_OFFICE' && currentUser?.role === 'SUPER_ADMIN' && !currentUser?.isHeadOffice && main) {
-      return main.name;
-    }
-    return branchId;
-  };
+  const getBranchDisplayName = (branchId?: string) =>
+    formatBranchName(branches, branchId, 'Unknown');
 
 
   // Approval action handlers
@@ -505,8 +485,7 @@ const Approvals: React.FC<ApprovalsProps> = ({
                           </div>
                         </td>
                         <td className="px-6 py-4 text-sm font-medium text-slate-700">
-                          {branches.find(b => b.id === expense.branchId)?.name ||
-                            'Unknown'}
+                          {getBranchDisplayName(expense.branchId)}
                         </td>
                         <td className="px-6 py-4">
                           <span className="px-2 py-1 rounded bg-slate-100 text-slate-600 text-xs font-bold">
@@ -582,8 +561,7 @@ const Approvals: React.FC<ApprovalsProps> = ({
                         </div>
                         <div>
                           <h4 className="font-bold text-slate-800 text-lg flex items-center gap-2">
-                            {branches.find(b => b.id === req.branchId)?.name ||
-                              'Unknown'}
+                            {getBranchDisplayName(req.branchId)}
                             {req.priority === 'URGENT' && (
                               <span className="text-xs bg-rose-600 text-white px-2 py-0.5 rounded animate-pulse">
                                 URGENT
@@ -733,8 +711,8 @@ const Approvals: React.FC<ApprovalsProps> = ({
                       <div>
                         <h4 className="font-bold text-slate-800 text-lg">{transfer.id}</h4>
                         <p className="text-sm text-slate-500 mt-1">
-                          From: {branches.find(b => b.id === transfer.sourceBranchId)?.name || 'Unknown'} →
-                          To: {branches.find(b => b.id === transfer.targetBranchId)?.name || 'Unknown'}
+                          From: {getBranchDisplayName(transfer.sourceBranchId)} →
+                          To: {getBranchDisplayName(transfer.targetBranchId)}
                         </p>
                         <p className="text-sm text-slate-500">Date: {new Date(transfer.dateSent).toLocaleDateString()}</p>
                       </div>
@@ -788,8 +766,8 @@ const Approvals: React.FC<ApprovalsProps> = ({
                       <div>
                         <h4 className="font-bold text-slate-800 text-lg">{transfer.id}</h4>
                         <p className="text-sm text-slate-500 mt-1">
-                          From: {branches.find(b => b.id === transfer.sourceBranchId)?.name || 'Unknown'} →
-                          To: {branches.find(b => b.id === transfer.targetBranchId)?.name || 'Unknown'}
+                          From: {getBranchDisplayName(transfer.sourceBranchId)} →
+                          To: {getBranchDisplayName(transfer.targetBranchId)}
                         </p>
                         <p className="text-sm text-slate-500">Date: {new Date(transfer.dateSent).toLocaleDateString()}</p>
                       </div>
@@ -853,8 +831,7 @@ const Approvals: React.FC<ApprovalsProps> = ({
                     <div className="flex justify-between items-start mb-4 flex-wrap gap-4">
                       <div>
                         <h4 className="font-bold text-slate-800 text-lg flex items-center gap-2">
-                          {branches.find(b => b.id === req.branchId)?.name ||
-                            'Unknown'}
+                          {getBranchDisplayName(req.branchId)}
                         </h4>
                         <p className="text-sm text-slate-500 mt-1">
                           Requested by {req.requestedBy} on {req.date}
@@ -923,8 +900,7 @@ const Approvals: React.FC<ApprovalsProps> = ({
                     <div className="flex justify-between items-start mb-4 flex-wrap gap-4">
                       <div>
                         <h4 className="font-bold text-slate-800 text-lg flex items-center gap-2">
-                          {branches.find(b => b.id === req.branchId)?.name ||
-                            'Unknown'}
+                          {getBranchDisplayName(req.branchId)}
                         </h4>
                         <p className="text-sm text-slate-500 mt-1">
                           Requested by {req.requestedBy} on {req.date}

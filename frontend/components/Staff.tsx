@@ -36,6 +36,7 @@ import {
 import { Staff as StaffType, UserRole, Branch, AuditLog } from '../types';
 import { api } from '../services/api';
 import { useNotifications } from './NotificationContext';
+import { getBranchDisplayName } from '../utils/branchDisplay';
 
 interface StaffProps {
     currentBranchId: string;
@@ -69,7 +70,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
   // Branch and role helpers
   const currentBranch = branches.find(b => b.id === currentBranchId);
   const isHeadOffice = currentBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';
-  const branchName = currentBranch?.name;
+  const branchName = currentBranch ? getBranchDisplayName(branches, currentBranch.id, currentBranch.name) : undefined;
 
   // Duplicate checking helpers
   const checkEmailDuplicate = (email: string, excludeId?: string) => {
@@ -400,8 +401,8 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
         // Check if branch was changed (transfer)
         const originalStaff = staffList.find(s => s.id === editingStaff.id);
         if (originalStaff && originalStaff.branchId !== editingStaff.branchId) {
-            const oldBranchName = branches.find(b => b.id === originalStaff.branchId)?.name || 'Unknown';
-            const newBranchName = branches.find(b => b.id === editingStaff.branchId)?.name || 'Unknown';
+            const oldBranchName = getBranchDisplayName(branches, originalStaff.branchId, 'Unknown');
+            const newBranchName = getBranchDisplayName(branches, editingStaff.branchId, 'Unknown');
             showSuccess('Staff Transferred', `${editingStaff.name} has been successfully transferred from ${oldBranchName} to ${newBranchName}.`);
         } else {
             showSuccess('Staff Updated', `${editingStaff.name}'s information has been successfully updated in the database.`);
@@ -594,7 +595,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
       staff.email,
       staff.phone,
       staff.role.replace('_', ' '),
-      staff.branchId ? branches.find(b => b.id === staff.branchId)?.name || 'Unknown' : 'No Branch',
+      staff.branchId ? getBranchDisplayName(branches, staff.branchId, 'Unknown') : 'No Branch',
       staff.status,
       staff.joinedDate || '',
       staff.lastLogin || ''
@@ -866,7 +867,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                   >
                     <option value="ALL">All Branches</option>
                     {branches.map(branch => (
-                      <option key={branch.id} value={branch.id}>{branch.name}</option>
+                      <option key={branch.id} value={branch.id}>{getBranchDisplayName(branches, branch.id, branch.name)}</option>
                     ))}
                   </select>
                 </div>
@@ -1014,7 +1015,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                           <div className="flex items-center gap-3">
                               <MapPin size={16} className="text-slate-400" />
                               <span className="text-teal-700 font-medium">
-                                  {member.branchId ? (branches.find(b => b.id === member.branchId)?.name || 'Unknown Branch') : 'No Branch Assigned'}
+                                  {member.branchId ? getBranchDisplayName(branches, member.branchId, 'Unknown Branch') : 'No Branch Assigned'}
                               </span>
                           </div>
                       </div>
@@ -1092,7 +1093,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                           <button
                             type="button"
                             onClick={() => {
-                              setSelectedRoleForPermissions(newStaff.role);
+                              setSelectedRoleForPermissions(newStaff.role || UserRole.DISPENSER);
                               setShowPermissionsModal(true);
                             }}
                             className="text-slate-400 hover:text-teal-600 p-1"
@@ -1389,13 +1390,13 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                       !editingStaff.name || 
                       !editingStaff.role || 
                       !editingStaff.branchId ||
-                      (editingStaff.email && editingStaff.email.trim() && !editEmailValidation.isValid)
+                      Boolean(editingStaff.email && editingStaff.email.trim() && !editEmailValidation.isValid)
                     }
                     className={`px-6 py-2 font-bold rounded-lg shadow-sm flex items-center gap-2 transition-all ${
                       !editingStaff.name || 
                       !editingStaff.role || 
                       !editingStaff.branchId ||
-                      (editingStaff.email && editingStaff.email.trim() && !editEmailValidation.isValid)
+                      Boolean(editingStaff.email && editingStaff.email.trim() && !editEmailValidation.isValid)
                         ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
                         : 'bg-teal-600 text-white hover:bg-teal-700'
                     }`}
@@ -1494,7 +1495,7 @@ const Staff: React.FC<StaffProps> = ({ currentBranchId, branches, staffList: pro
                   >
                     <option value="">Select Branch</option>
                     {branches.map(branch => (
-                      <option key={branch.id} value={branch.id}>{branch.name}</option>
+                      <option key={branch.id} value={branch.id}>{getBranchDisplayName(branches, branch.id, branch.name)}</option>
                     ))}
                   </select>
                 </div>

@@ -39,13 +39,12 @@ function getAuditLogs() {
         $sql .= ' ORDER BY timestamp DESC LIMIT ? OFFSET ?';
         
         $stmt = $pdo->prepare($sql);
-        $stmt->bindValue(count($params), $limit, PDO::PARAM_INT);
-        $stmt->bindValue(count($params) + 1, $offset, PDO::PARAM_INT);
-        
+        $bindIndex = 1;
         for ($i = 0; $i < count($params); $i++) {
-            $stmt->bindValue($i + 1, $params[$i], PDO::PARAM_STR);
+            $stmt->bindValue($bindIndex++, $params[$i], PDO::PARAM_STR);
         }
-        
+        $stmt->bindValue($bindIndex++, $limit, PDO::PARAM_INT);
+        $stmt->bindValue($bindIndex, $offset, PDO::PARAM_INT);
         $stmt->execute();
 
         $logs = $stmt->fetchAll();
@@ -80,6 +79,7 @@ function createAuditLog() {
     global $pdo;
 
     try {
+        $user = authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT']);
         $input = json_decode(file_get_contents('php://input'), true);
 
         $userId = $input['userId'] ?? null;
@@ -95,8 +95,26 @@ function createAuditLog() {
         $branchId = $input['branchId'] ?? null;
         $severity = $input['severity'] ?? 'INFO';
 
+        $resolvedBranchId = $branchId ?: ($user['branch_id'] ?? null);
+        if ($resolvedBranchId === '' || strtoupper((string)$resolvedBranchId) === 'HEAD_OFFICE') {
+            $resolvedBranchId = null;
+        }
+
         $stmt = $pdo->prepare('INSERT INTO audit_logs (user_id, user_name, action, entity_type, entity_id, details, old_values, new_values, ip_address, user_agent, branch_id, severity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-        $stmt->execute([$userId, $userName, $action, $entityType, $entityId, $details, $oldValues, $newValues, $ipAddress, $userAgent, $branchId, $severity]);
+        $stmt->execute([
+            $userId ?: ($user['id'] ?? null),
+            $userName ?: ($user['name'] ?? ''),
+            $action,
+            $entityType,
+            $entityId,
+            $details,
+            $oldValues,
+            $newValues,
+            $ipAddress,
+            $userAgent,
+            $resolvedBranchId,
+            $severity
+        ]);
 
         echo json_encode(['message' => 'Audit log created']);
     } catch (Exception $e) {

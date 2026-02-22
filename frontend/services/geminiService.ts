@@ -95,7 +95,7 @@ export const digitizePrescription = async (imageBase64: string): Promise<any> =>
                 }
             }
         });
-        return JSON.parse(response.text);
+        return JSON.parse(response.text || '{}');
     } catch (e) {
         console.error(e);
         return { error: "Failed to process image" };

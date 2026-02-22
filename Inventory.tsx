@@ -31,7 +31,7 @@ import {
   BarChart3,
   Download
 } from 'lucide-react';
-import { StockTransfer, Product, BranchInventoryItem, BatchStatus, StockRequisition, Staff, Branch, Sale } from '../types';
+import { StockTransfer, Product, BranchInventoryItem, BatchStatus, StockRequisition, Staff, Branch, Sale, Shipment } from '../types';
 import { useNotifications } from './NotificationContext';
 import { api } from '../services/api';
 
@@ -135,6 +135,9 @@ const Inventory: React.FC<InventoryProps> = ({
           const fetchedTransfers = await api.getTransfers();
           setTransfers(fetchedTransfers);
         }
+        // Load shipments
+        const fetchedShipments = await api.getShipments();
+        setShipments(fetchedShipments);
       } catch (error) {
         console.error('Failed to load inventory data:', error);
         showError('Data Load Error', 'Failed to load inventory data. Please refresh the page.');
@@ -146,6 +149,7 @@ const Inventory: React.FC<InventoryProps> = ({
   const [activeTab, setActiveTab] = useState<'stock' | 'transfers'>('stock');
   const [showAddModal, setShowAddModal] = useState(false);
   const [addMode, setAddMode] = useState<'EXISTING' | 'NEW'>('EXISTING');
+  const [shipments, setShipments] = useState<Shipment[]>([]);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [showVerifyModal, setShowVerifyModal] = useState(false);
@@ -1450,6 +1454,73 @@ const Inventory: React.FC<InventoryProps> = ({
                            </div>
                        </div>
                    )}
+
+                   {/* New Shipments (Approval-based workflow) */}
+                   {shipments.length > 0 && (
+                       <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+                           <div className="p-4 border-b border-slate-100 bg-slate-50">
+                               <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                                   <Package size={18} className="text-purple-600" /> Managed Shipments
+                               </h3>
+                           </div>
+                           <div className="divide-y divide-slate-100">
+                               {shipments.length === 0 ? (
+                                   <div className="p-8 text-center text-slate-400">No managed shipments.</div>
+                               ) : (
+                                   shipments.filter(s => {
+                                       const isIncoming = s.toBranchId === currentBranchId;
+                                       const isOutgoing = s.fromBranchId === currentBranchId;
+                                       return isIncoming || isOutgoing || currentUser?.role === 'SUPER_ADMIN';
+                                   }).map(s => {
+                                       const isIncoming = s.toBranchId === currentBranchId;
+                                       const isOutgoing = s.fromBranchId === currentBranchId;
+                                       const items = s.items || [];
+                                       const totalQuantity = items.reduce((sum, i) => sum + (i?.quantity || 0), 0);
+                                       const pricePerUnit = totalQuantity > 0 ? (s.totalValue || 0) / totalQuantity : 0;
+                                       
+                                       return (
+                                           <div key={s.id} className="p-6">
+                                               <div className="flex justify-between items-start mb-4">
+                                                   <div>
+                                                       <h4 className="font-bold text-lg text-slate-800">{s.id}</h4>
+                                                       {isIncoming && <p className="text-sm text-slate-500">From: {branches.find(b => b.id === s.fromBranchId)?.name || 'Unknown Branch'}</p>}
+                                                       {isOutgoing && <p className="text-sm text-slate-500">To: {branches.find(b => b.id === s.toBranchId)?.name || 'Unknown Branch'}</p>}
+                                                       <p className="text-sm text-slate-500">Date: {s.createdAt ? new Date(s.createdAt).toLocaleDateString() : 'N/A'}</p>
+                                                       {s.notes && <p className="text-sm text-slate-600 mt-1">Notes: {s.notes}</p>}
+                                                   </div>
+                                                   <div className="text-right flex flex-col gap-2">
+                                                       <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+                                                           s.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-700' : 
+                                                           s.status === 'APPROVED' ? 'bg-blue-100 text-blue-700' : 
+                                                           s.status === 'REJECTED' ? 'bg-red-100 text-red-700' : 
+                                                           'bg-amber-100 text-amber-700'
+                                                       }`}>
+                                                           {s.status}
+                                                       </span>
+                                                   </div>
+                                               </div>
+                                               
+                                               <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 mb-3">
+                                                   <p className="text-sm font-semibold text-slate-800 mb-2">Items ({items.length})</p>
+                                                   <div className="space-y-1 max-h-32 overflow-y-auto">
+                                                       {items.map((item, idx) => (
+                                                           <div key={idx} className="text-sm text-slate-600 flex justify-between">
+                                                               <span>{item?.productName || 'Unknown Product'}</span>
+                                                               <span className="font-semibold">{item?.quantity || 0} units @ Ksh {pricePerUnit.toFixed(2)}</span>
+                                                           </div>
+                                                       ))}
+                                                   </div>
+                                                   <div className="text-sm font-bold text-slate-900 mt-2 border-t pt-2">
+                                                       Total Value: Ksh {((s.totalValue || 0).toFixed(2))}
+                                                   </div>
+                                               </div>
+                                           </div>
+                                       );
+                                   })
+                               )}
+                           </div>
+                       </div>
+                   )}
                </div>
            )}
        </div>
@@ -2216,11 +2287,11 @@ const Inventory: React.FC<InventoryProps> = ({
                                        </div>
                                        <div className="max-h-32 overflow-y-auto">
                                            <ul className="text-xs text-amber-600 space-y-1">
-                                               {bulkImportDuplicates.map((dup, idx) => (
-                                                   <li key={idx}>
-                                                       • Row {dup.rowNum}: "{dup.productName}" (existing ID: {dup.existingProduct.id})
-                                                   </li>
-                                               ))}
+                                            {bulkImportDuplicates.map((dup: BulkImportDuplicate, idx: number) => (
+                                                <li key={idx}>
+                                                    • Row {dup.rowNum}: "{dup.productName}" (existing ID: {dup.existingProduct.id})
+                                                </li>
+                                            ))}
                                            </ul>
                                        </div>
                                    </div>

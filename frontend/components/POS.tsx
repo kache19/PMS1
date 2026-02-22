@@ -38,7 +38,7 @@ import Entities from './Entities';
 interface POSProps {
   currentBranchId: string;
   inventory: Record<string, BranchInventoryItem[]>;
-  onCreateInvoice: (invoice: Invoice) => void;
+  onCreateInvoice: (invoice: Invoice) => Promise<Invoice>;
   products: Product[];
 }
 
@@ -69,6 +69,9 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
+  const [showTodaySalesModal, setShowTodaySalesModal] = useState(false);
+  const [todaySales, setTodaySales] = useState<Invoice[]>([]);
+  const [isLoadingTodaySales, setIsLoadingTodaySales] = useState(false);
   
   // Company settings state
   const [companySettings, setCompanySettings] = useState({
@@ -80,6 +83,28 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
     email: 'info@pms-pharmacy.tz',
     logo: '/backend_php/uploads/logos/logo.png'
   });
+
+  const normalizeBranchId = (value: unknown) => String(value ?? '').trim();
+  const branchIdVariants = (value: unknown) => {
+    const raw = normalizeBranchId(value).toUpperCase();
+    if (!raw) return [];
+    const variants = new Set<string>([raw]);
+    const prefixed = raw.match(/^BR0*(\d+)$/);
+    if (prefixed) variants.add(String(Number(prefixed[1])));
+    if (/^\d+$/.test(raw)) variants.add(`BR${raw.padStart(3, '0')}`);
+    return Array.from(variants);
+  };
+  const branchIdsMatch = (a: unknown, b: unknown) => {
+    const aVariants = branchIdVariants(a);
+    const bVariants = new Set(branchIdVariants(b));
+    return aVariants.some((id) => bVariants.has(id));
+  };
+  const getBranchStockList = () => {
+    const exact = inventory[currentBranchId];
+    if (exact) return exact;
+    const matchedKey = Object.keys(inventory).find((key) => branchIdsMatch(key, currentBranchId));
+    return matchedKey ? inventory[matchedKey] : [];
+  };
 
   // Load branches, logo and company settings on mount
   useEffect(() => {
@@ -135,14 +160,14 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
     }
   };
 
-  const currentBranch = branches.find(b => b.id === currentBranchId);
+  const currentBranch = branches.find((b) => branchIdsMatch(b.id, currentBranchId));
   const isHeadOffice = currentBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';
   const isMainBranch = currentBranchId === 'BR003' || isHeadOffice; // Allow main branch (BR003) to have POS access
   const branchName = currentBranch?.name || 'Unknown Branch';
 
   // Merge Products with Branch Specific Inventory
   const availableProducts: Product[] = products.map(p => {
-    const branchStockList = inventory[currentBranchId] || [];
+    const branchStockList = getBranchStockList();
     const inventoryItem = branchStockList.find(i => i.productId === p.id);
     const customPrice = inventoryItem?.customPrice;
 
@@ -163,6 +188,35 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
   const subtotal = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
   const vat = 0; // VAT removed system-wide
   const total = subtotal;
+
+  const loadTodaySales = async () => {
+    setIsLoadingTodaySales(true);
+    try {
+      const allInvoices = await api.getInvoices();
+      const currentUser = api.getCurrentUser();
+      const currentUserId = String(currentUser?.id || '');
+      const today = new Date().toISOString().slice(0, 10);
+      const todaysPosInvoices = (allInvoices || []).filter((inv) => {
+        const invoiceDate = String(inv?.dateIssued || '').slice(0, 10);
+        return (
+          invoiceDate === today &&
+          branchIdsMatch(inv?.branchId, currentBranchId) &&
+          String(inv?.source || '').toUpperCase() === 'POS'
+        );
+      });
+      const hasCreatorTag = todaysPosInvoices.some((inv) => String(inv?.createdBy || '').trim() !== '');
+      const filtered = hasCreatorTag
+        ? todaysPosInvoices.filter((inv) => String(inv?.createdBy || '') === currentUserId)
+        : todaysPosInvoices;
+      setTodaySales(filtered);
+      setShowTodaySalesModal(true);
+    } catch (error) {
+      console.error('Failed to load today sales:', error);
+      showError('Load Failed', "Unable to load today's sales.");
+    } finally {
+      setIsLoadingTodaySales(false);
+    }
+  };
 
 
   const addToCart = (product: Product) => {
@@ -275,6 +329,7 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
       return;
     }
 
+    const currentUser = api.getCurrentUser();
     // Create a temporary invoice for preview
     const tempInvoice: Invoice = {
       id: `PREVIEW-${Date.now().toString().slice(-6)}`,
@@ -288,13 +343,15 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
       status: 'UNPAID',
       description: 'Invoice from POS',
       source: 'POS',
+      createdBy: currentUser?.id,
       items: cart.map(item => ({
         id: item.id,
         name: item.name,
         quantity: item.quantity,
         price: item.price,
         costPrice: item.costPrice || 0,
-        selectedBatch: item.selectedBatch || 'AUTO'
+        selectedBatch: item.selectedBatch || 'AUTO',
+        discount: item.discount || 0
       })),
       payments: []
     };
@@ -310,6 +367,7 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
       return;
     }
 
+    const currentUser = api.getCurrentUser();
     const invoiceData: Partial<Invoice> = {
       // Backend will generate ID in format INV-BR###-YYYY-0001 if not provided
       branchId: currentBranchId,
@@ -321,13 +379,15 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
         quantity: item.quantity,
         price: item.price,
         costPrice: item.costPrice || 0,
-        selectedBatch: item.selectedBatch || 'AUTO'
+        selectedBatch: item.selectedBatch || 'AUTO',
+        discount: item.discount || 0
       })),
       totalAmount: total,
       paidAmount: 0,
       status: 'UNPAID',
       description: 'Invoice from POS',
       source: 'POS',
+      createdBy: currentUser?.id,
       dateIssued: new Date().toISOString().split('T')[0],
       dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       payments: []
@@ -479,7 +539,7 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
                           </span>
                           <div className="flex items-center gap-2">
                             <span className="text-[10px] text-slate-400">Stock: {product.baseStock}</span>
-                            {product.pendingIncoming > 0 && (
+                            {(product.pendingIncoming || 0) > 0 && (
                               <span className="text-[10px] text-teal-700 bg-teal-100 px-2 py-0.5 rounded-full font-bold">+{product.pendingIncoming} incoming</span>
                             )}
                           </div>
@@ -505,15 +565,25 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
               </h2>
               <p className="text-xs text-teal-600 font-bold mt-1">Location: {branchName}</p>
             </div>
-            {cart.length > 0 && (
+            <div className="flex items-center gap-2">
               <button
-                onClick={() => setCart([])}
-                className="text-slate-400 hover:text-rose-500"
-                title="Clear Cart"
+                onClick={loadTodaySales}
+                disabled={isLoadingTodaySales}
+                className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+                title="View today's sales"
               >
-                <X size={20} />
+                {isLoadingTodaySales ? 'Loading...' : "Today's Sales"}
               </button>
-            )}
+              {cart.length > 0 && (
+                <button
+                  onClick={() => setCart([])}
+                  className="text-slate-400 hover:text-rose-500"
+                  title="Clear Cart"
+                >
+                  <X size={20} />
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
@@ -605,6 +675,86 @@ const POS: React.FC<POSProps> = ({ currentBranchId, inventory, onCreateInvoice, 
           </div>
         </div>
       </div>
+
+      {showTodaySalesModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 no-print">
+          <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between p-4 border-b border-slate-200">
+              <h3 className="text-lg font-bold text-slate-900">Today's Invoices</h3>
+              <button
+                onClick={() => setShowTodaySalesModal(false)}
+                className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-4 overflow-auto">
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <div className="rounded-lg border border-slate-200 p-3">
+                  <p className="text-xs text-slate-500">Total Invoices (Count)</p>
+                  <p className="text-xl font-bold text-slate-900">{todaySales.length}</p>
+                </div>
+                <div className="rounded-lg border border-slate-200 p-3">
+                  <p className="text-xs text-slate-500">Total Amount</p>
+                  <p className="text-xl font-bold text-slate-900">
+                    {todaySales.reduce((sum, sale) => sum + Number(sale?.totalAmount || 0), 0).toLocaleString()} TZS
+                  </p>
+                </div>
+              </div>
+
+              {todaySales.length === 0 ? (
+                <p className="text-sm text-slate-500">No invoices recorded today for this branch.</p>
+              ) : (
+                <table className="w-full text-left">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="px-3 py-2 text-xs font-semibold text-slate-500 uppercase">Invoice ID</th>
+                      <th className="px-3 py-2 text-xs font-semibold text-slate-500 uppercase">Time</th>
+                      <th className="px-3 py-2 text-xs font-semibold text-slate-500 uppercase">Amount</th>
+                      <th className="px-3 py-2 text-xs font-semibold text-slate-500 uppercase">Status</th>
+                      <th className="px-3 py-2 text-xs font-semibold text-slate-500 uppercase">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {todaySales.map((inv) => (
+                      <tr key={inv.id} className="hover:bg-slate-50">
+                        <td className="px-3 py-2 text-sm font-medium text-slate-800">{inv.id}</td>
+                        <td className="px-3 py-2 text-sm text-slate-600">
+                          {inv.dateIssued ? new Date(inv.dateIssued).toLocaleTimeString() : 'N/A'}
+                        </td>
+                        <td className="px-3 py-2 text-sm font-semibold text-slate-900">
+                          {Number(inv.totalAmount || 0).toLocaleString()} TZS
+                        </td>
+                        <td className="px-3 py-2 text-sm">
+                          <span className={`px-2 py-1 rounded text-xs font-bold ${
+                            inv.status === 'PAID'
+                              ? 'bg-emerald-100 text-emerald-700'
+                              : 'bg-rose-100 text-rose-700'
+                          }`}>
+                            {inv.status === 'PAID' ? 'PAID' : 'NOT PAID'}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-sm">
+                          <button
+                            onClick={() => {
+                              setPreviewInvoice(inv);
+                              setShowPreviewModal(true);
+                            }}
+                            className="px-2.5 py-1.5 text-xs font-semibold rounded-md bg-blue-50 text-blue-700 hover:bg-blue-100 flex items-center gap-1"
+                          >
+                            <Eye size={14} /> View
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Customer Name Modal (simplified) */}
       {customerModalOpen && (

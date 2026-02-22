@@ -13,6 +13,7 @@ import { Invoice, PaymentMethod, Expense, Sale, Branch, Staff, UserRole, SystemS
 import { api } from '../services/api';
 import { printService } from '../services/printService';
 import { openCustomPrint } from '../services/printUtils';
+import { runWithPreservedWindowScroll } from '../utils/scrollStability';
 import InvoiceModal from './InvoiceModal';
 import ExpenseModal from './ExpenseModal';
 import InvoicePreviewModal from './InvoicePreviewModal';
@@ -75,10 +76,11 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
 
   const currentBranch = branches.find(b => b.id === currentBranchId);
   const isHeadOffice = currentBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';
+  const isAuditorReadOnly = currentUser?.role === UserRole.AUDITOR;
   const branchName = currentBranch?.name || 'All Branches';
 
   // Form States
-  const [newInvoice, setNewInvoice] = useState({ customer: '', phone: '', amount: '', description: '', due: '' });
+  const [newInvoice, setNewInvoice] = useState({ customer: '', phone: '', amount: '', description: '', due: '', includeVAT: false });
   const [newPayment, setNewPayment] = useState({ amount: '', discount: '', receipt: '', method: PaymentMethod.CASH });
   const [newExpense, setNewExpense] = useState({
     description: '',
@@ -130,16 +132,18 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
      loadFinanceData(true);
 
      // Set up polling every 30 seconds
-     const intervalId = setInterval(() => loadFinanceData(false), 30000);
+     const intervalId = setInterval(() => {
+       void runWithPreservedWindowScroll(() => loadFinanceData(false));
+     }, 30000);
 
      // Cleanup interval on unmount or branch change
      return () => clearInterval(intervalId);
    }, [currentBranchId]); // Reload when branch changes
 
   // Filter Data Logic
-  const filteredInvoices = isHeadOffice ? invoices : invoices.filter(i => i.branchId === currentBranchId);
-  const filteredExpenses = isHeadOffice ? expenses : expenses.filter(e => e.branchId === currentBranchId);
-  const filteredSales = isHeadOffice ? sales : sales.filter(s => s.branchId === currentBranchId);
+  const filteredInvoices = (isHeadOffice || isAuditorReadOnly) ? invoices : invoices.filter(i => i.branchId === currentBranchId);
+  const filteredExpenses = (isHeadOffice || isAuditorReadOnly) ? expenses : expenses.filter(e => e.branchId === currentBranchId);
+  const filteredSales = (isHeadOffice || isAuditorReadOnly) ? sales : sales.filter(s => s.branchId === currentBranchId);
 
   // Search and Filter Logic
   const searchedInvoices = filteredInvoices.filter(inv =>
@@ -204,6 +208,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
   // Permission Logic for Expense Approval
   const canApproveExpenses = (expense: Expense) => {
     if (!currentUser) return false;
+    if (isAuditorReadOnly) return false;
 
     // SUPER_ADMIN can approve all expenses
     if (currentUser.role === UserRole.SUPER_ADMIN) return true;
@@ -219,7 +224,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
 
   const canViewExpenseDetails = () => {
     if (!currentUser) return false;
-    return [UserRole.SUPER_ADMIN, UserRole.ACCOUNTANT, UserRole.BRANCH_MANAGER].includes(currentUser.role);
+    return [UserRole.SUPER_ADMIN, UserRole.ACCOUNTANT, UserRole.BRANCH_MANAGER, UserRole.AUDITOR].includes(currentUser.role);
   };
 
   // DYNAMIC CALCULATIONS
@@ -287,7 +292,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
   };
 
   const handleExportSales = () => {
-    const exportData = reportSales.map((s: Sale) => ({
+    const exportData: Record<string, string | number | undefined>[] = reportSales.map((s: Sale) => ({
       ID: s.id,
       Date: s.date,
       Time: new Date(s.date).toLocaleTimeString(),
@@ -372,6 +377,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
   }, [filteredInvoices, filteredExpenses]);
 
   const handleCreateInvoice = async () => {
+    if (isAuditorReadOnly) return;
     if(!newInvoice.customer || !newInvoice.amount) return;
 
     try {
@@ -398,7 +404,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
       }
 
       setShowInvoiceModal(false);
-      setNewInvoice({ customer: '', phone: '', amount: '', description: '', due: '' });
+      setNewInvoice({ customer: '', phone: '', amount: '', description: '', due: '', includeVAT: false });
     } catch (error) {
       console.error('Failed to create invoice:', error);
       throw new Error('Failed to create invoice. Please check your connection and try again.');
@@ -422,6 +428,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
   };
 
   const handleRecordPayment = async () => {
+    if (isAuditorReadOnly) return;
     if(!selectedInvoice || !newPayment.amount || !newPayment.receipt) return;
 
     try {
@@ -465,6 +472,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
   };
 
   const handleRecordExpense = async () => {
+    if (isAuditorReadOnly) return;
     if (!newExpense.description || !newExpense.amount) return;
 
     try {
@@ -519,7 +527,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
           <div>
             <h2 className="text-3xl font-bold text-slate-900">Finance & Accounting</h2>
             <p className="text-slate-500 mt-1">
-              {isHeadOffice ? 'Global Financial Overview' : `Financials for ${branches.find(b => b.id === currentBranchId)?.name || 'Current Branch'}`}
+              {(isHeadOffice || isAuditorReadOnly) ? 'Global Financial Overview' : `Financials for ${branches.find(b => b.id === currentBranchId)?.name || 'Current Branch'}`}
             </p>
           </div>
           <div className="flex gap-2">
@@ -650,12 +658,14 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                    <option value="UNPAID">Unpaid</option>
                  </select>
 
-                 <button
-                   onClick={() => setShowInvoiceModal(true)}
-                   className="flex items-center gap-2 px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 font-medium text-sm shadow-md shadow-teal-600/20"
-                 >
-                   <FilePlus size={16} /> Create Manual Invoice
-                 </button>
+                 {!isAuditorReadOnly && (
+                   <button
+                     onClick={() => setShowInvoiceModal(true)}
+                     className="flex items-center gap-2 px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 font-medium text-sm shadow-md shadow-teal-600/20"
+                   >
+                     <FilePlus size={16} /> Create Manual Invoice
+                   </button>
+                 )}
                </div>
              </div>
             
@@ -735,6 +745,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                                         {inv.status !== 'PAID' ? (
                                           <button
                                             onClick={() => openPaymentModal(inv)}
+                                            disabled={isAuditorReadOnly}
                                             className="text-teal-600 hover:text-teal-800 font-bold text-xs bg-teal-50 px-2 py-1 rounded hover:bg-teal-100 flex items-center gap-1 transition-colors whitespace-nowrap"
                                           >
                                               <Wallet size={12} /> Pay Now
@@ -744,7 +755,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                                                 <span className="text-slate-400 text-xs flex items-center gap-1 px-2">
                                                     <CheckCircle size={12} /> Paid
                                                 </span>
-                                                {onArchiveItem && (
+                                                {!isAuditorReadOnly && onArchiveItem && (
                                                     <button
                                                         onClick={() => onArchiveItem('invoice', inv.id)}
                                                         className="text-slate-400 hover:text-amber-600 p-1.5 hover:bg-amber-50 rounded"
@@ -799,12 +810,14 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                      <option value="Rejected">Rejected</option>
                    </select>
 
-                   <button
-                     onClick={() => setShowExpenseModal(true)}
-                     className="flex items-center gap-2 px-4 py-2 bg-rose-600 text-white rounded-lg hover:bg-rose-700 font-medium text-sm shadow-md shadow-rose-600/20"
-                   >
-                     <Plus size={16} /> Record Expense
-                   </button>
+                   {!isAuditorReadOnly && (
+                     <button
+                       onClick={() => setShowExpenseModal(true)}
+                       className="flex items-center gap-2 px-4 py-2 bg-rose-600 text-white rounded-lg hover:bg-rose-700 font-medium text-sm shadow-md shadow-rose-600/20"
+                     >
+                       <Plus size={16} /> Record Expense
+                     </button>
+                   )}
                  </div>
                </div>
 
@@ -869,7 +882,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                                               </button>
                                           )}
                                           {/* Additional Actions for Super Admin and Accountant (Finance) */}
-                                          {(currentUser?.role === UserRole.SUPER_ADMIN || currentUser?.role === UserRole.ACCOUNTANT || true) && ( // TEMP: Show for all users for testing
+                                          {!isAuditorReadOnly && (currentUser?.role === UserRole.SUPER_ADMIN || currentUser?.role === UserRole.ACCOUNTANT || true) && ( // TEMP: Show for all users for testing
                                               <>
                                                   <button
                                                       onClick={() => {
@@ -912,7 +925,7 @@ const Finance: React.FC<FinanceProps> = ({ currentBranchId, invoices: propInvoic
                                                   </button>
                                               </>
                                           )}
-                                          {['Approved', 'Rejected'].includes(exp.status) && onArchiveItem && (
+                                          {!isAuditorReadOnly && ['Approved', 'Rejected'].includes(exp.status) && onArchiveItem && (
                                               <button
                                                   onClick={() => onArchiveItem('expense', exp.id)}
                                                   className="text-slate-400 hover:text-amber-600 p-1.5 hover:bg-amber-50 rounded"

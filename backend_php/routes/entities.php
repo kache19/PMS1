@@ -15,6 +15,8 @@ require_once __DIR__ . '/../utils/auth.php';
 
 global $pdo;
 
+const ENTITY_ALLOWED_PAYMENT_TERMS = ['CASH', 'MOBILE', 'BANK'];
+
 // Check if entities table exists
 try {
     debugLog("Checking if entities table exists...");
@@ -333,6 +335,12 @@ function createEntity() {
         }
 
         $type = $input['type'] ?? 'CUSTOMER';
+        $paymentTerms = normalizePaymentTerms($input['paymentTerms'] ?? 'CASH');
+        if ($paymentTerms === null) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid payment terms. Allowed values: CASH, MOBILE, BANK']);
+            return;
+        }
         $id = $input['id'] ?? 'ENT-' . time() . '-' . rand(1000, 9999);
 
         $stmt = $pdo->prepare('SELECT id FROM entities WHERE id = ?');
@@ -366,7 +374,7 @@ function createEntity() {
             $input['vatNumber'] ?? null,
             $input['contactPerson'] ?? null,
             $input['contactPhone'] ?? null,
-            $input['paymentTerms'] ?? null,
+            $paymentTerms,
             $input['creditLimit'] ?? 0,
             0.00, // current_balance default
             $input['discountPercentage'] ?? 0,
@@ -425,6 +433,23 @@ function updateEntity($id) {
         foreach ($allowedFields as $field) {
             $camelField = str_replace('_', '', lcfirst(ucwords($field, '_')));
             if (isset($input[$camelField])) {
+                if ($field === 'payment_terms') {
+                    $normalized = normalizePaymentTerms($input[$camelField]);
+                    if ($normalized === null) {
+                        http_response_code(400);
+                        echo json_encode(['error' => 'Invalid payment terms. Allowed values: CASH, MOBILE, BANK']);
+                        return;
+                    }
+                    $input[$camelField] = $normalized;
+                }
+                if ($field === 'tax_exempt') {
+                    $rawTaxExempt = $input[$camelField];
+                    $input[$camelField] = normalizeBooleanToTinyInt($rawTaxExempt);
+                }
+                if ($field === 'credit_limit' || $field === 'discount_percentage') {
+                    $rawNumber = $input[$camelField];
+                    $input[$camelField] = normalizeNumericValue($rawNumber, 0);
+                }
                 $fields[] = "$field = ?";
                 $params[] = $input[$camelField];
             }
@@ -500,7 +525,7 @@ function formatEntity($entity) {
         'vatNumber' => $entity['vat_number'],
         'contactPerson' => $entity['contact_person'],
         'contactPhone' => $entity['contact_phone'],
-        'paymentTerms' => $entity['payment_terms'],
+        'paymentTerms' => normalizePaymentTerms($entity['payment_terms'] ?? 'CASH') ?? 'CASH',
         'creditLimit' => (float)($entity['credit_limit'] ?? 0),
         'currentBalance' => (float)($entity['current_balance'] ?? 0),
         'discountPercentage' => (float)($entity['discount_percentage'] ?? 0),
@@ -512,5 +537,40 @@ function formatEntity($entity) {
         'createdAt' => $entity['created_at'],
         'updatedAt' => $entity['updated_at']
     ];
+}
+
+function normalizePaymentTerms($value) {
+    $normalized = strtoupper(trim((string)$value));
+    if ($normalized === '') {
+        $normalized = 'CASH';
+    }
+    if (!in_array($normalized, ENTITY_ALLOWED_PAYMENT_TERMS, true)) {
+        return null;
+    }
+    return $normalized;
+}
+
+function normalizeBooleanToTinyInt($value) {
+    if (is_bool($value)) {
+        return $value ? 1 : 0;
+    }
+    if ($value === null) {
+        return 0;
+    }
+    $text = strtolower(trim((string)$value));
+    if ($text === '' || $text === '0' || $text === 'false' || $text === 'no' || $text === 'off') {
+        return 0;
+    }
+    if ($text === '1' || $text === 'true' || $text === 'yes' || $text === 'on') {
+        return 1;
+    }
+    return ((int)$value) ? 1 : 0;
+}
+
+function normalizeNumericValue($value, $default = 0.0) {
+    if ($value === null) return $default;
+    if (is_string($value) && trim($value) === '') return $default;
+    if (!is_numeric($value)) return $default;
+    return (float)$value;
 }
 ?>

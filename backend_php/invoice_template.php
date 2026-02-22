@@ -63,21 +63,32 @@ class InvoiceTemplate {
     }
 
     private function getInvoiceData($invoiceId) {
-        $stmt = $this->pdo->prepare("\
-            SELECT i.*, b.name as branch_name, b.location as branch_location, cb.name as customer_branch_name, e.name as customer_entity_name\
-            FROM invoices i\
-            LEFT JOIN branches b ON i.branch_id = b.id\
-            LEFT JOIN branches cb ON i.customer_name = cb.id\
-            LEFT JOIN entities e ON i.customer_name = e.id\
-            WHERE i.id = ?\
+        $stmt = $this->pdo->prepare("
+            SELECT i.*, b.name as branch_name, b.location as branch_location, cb.name as customer_branch_name, e.name as customer_entity_name
+            FROM invoices i
+            LEFT JOIN branches b ON i.branch_id = b.id
+            LEFT JOIN branches cb ON i.customer_name = cb.id
+            LEFT JOIN entities e ON i.customer_name = e.id
+            WHERE i.id = ?
         ");
         $stmt->execute([$invoiceId]);
         return $stmt->fetch();
     }
 
     private function getInvoiceItems($invoiceId) {
+        $stmt = $this->pdo->prepare("SELECT items FROM invoices WHERE id = ?");
+        $stmt->execute([$invoiceId]);
+        $result = $stmt->fetch();
+        if ($result && $result['items']) {
+            return json_decode($result['items'], true) ?: [];
+        }
+        return [];
+    }
+
+    private function getInvoicePayments($invoiceId) {
         $stmt = $this->pdo->prepare("
-            SELECT * FROM invoice_payments
+            SELECT id, amount, discount, discount_percent, method, receipt_number, created_at
+            FROM invoice_payments
             WHERE invoice_id = ?
             ORDER BY created_at DESC
         ");
@@ -85,21 +96,8 @@ class InvoiceTemplate {
         return $stmt->fetchAll();
     }
 
-    private function getInvoicePayments($invoiceId) {
-        // Note: The current schema stores items as JSON in the items column
-        // We'll need to parse this
-        $stmt = $this->pdo->prepare("SELECT items FROM invoices WHERE id = ?");
-        $stmt->execute([$invoiceId]);
-        $result = $stmt->fetch();
-
-        if ($result && $result['items']) {
-            return json_decode($result['items'], true) ?: [];
-        }
-
-        return [];
-    }
-
     private function generateHTML($invoice, $items, $payments) {
+        $isRestockInvoice = strtoupper((string)($invoice['source'] ?? '')) === 'RESTOCK';
         $subtotal = 0;
         // Tax removed system-wide
         $taxRate = 0.0;
@@ -405,7 +403,7 @@ class InvoiceTemplate {
 
             <div class="customer-info">
                 <div class="info-box">
-                    <h3>Bill To</h3>';
+                    <h3>' . (strtoupper((string)($invoice['source'] ?? '')) === 'RESTOCK' ? 'Supply From' : 'Bill To') . '</h3>';
         if (!empty($invoice['customer_branch_name'])) {
             // It's a transfer between branches
             $html .= '
@@ -417,7 +415,7 @@ class InvoiceTemplate {
             // Regular customer
             $html .= '
                     <div class="info-row">
-                        <span class="info-label">Customer:</span>
+                        <span class="info-label">' . (strtoupper((string)($invoice['source'] ?? '')) === 'RESTOCK' ? 'Supplier:' : 'Customer:') . '</span>
                         <span class="info-value">' . htmlspecialchars($invoice['customer_entity_name'] ?? $invoice['customer_name']) . '</span>
                     </div>
                     <div class="info-row">
@@ -471,6 +469,9 @@ class InvoiceTemplate {
             </table>
         </div>
 
+';
+        if (!$isRestockInvoice) {
+            $html .= '
         <!-- Payment Information -->
         <div class="payment-info">
             <h4>Payment Terms & Conditions</h4>
@@ -478,6 +479,7 @@ class InvoiceTemplate {
             <p>Please make payments payable to: ' . htmlspecialchars($this->companyInfo['name']) . '</p>
             <p>Account Number: ' . htmlspecialchars($this->companyInfo['tax_id']) . '</p>
         </div>';
+        }
 
         if (!empty($invoice['description'])) {
             $html .= '

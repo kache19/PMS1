@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Plus,
   MapPin,
@@ -18,6 +18,7 @@ import {
 import { Branch, Staff } from '../types';
 import { useNotifications } from './NotificationContext';
 import { api } from '../services/api';
+import { branchIdsMatch } from '../utils/branchDisplay';
 
 interface BranchesProps {
     branches: Branch[];
@@ -43,8 +44,31 @@ const Branches: React.FC<BranchesProps> = ({ branches, onUpdateBranches, onAddBr
   // Stats
   const mainBranch = branches.find(b => b.isHeadOffice);
   const displayBranches = branches.filter(b => b.id !== (mainBranch?.id || 'HEAD_OFFICE'));
+  const tableBranches = [...branches].sort((a, b) => Number(Boolean(b.isHeadOffice)) - Number(Boolean(a.isHeadOffice)));
   const activeBranches = displayBranches.filter(b => b.status === 'ACTIVE').length;
   const totalStaff = staff.length;
+  const managerNamesByBranchId = useMemo(() => {
+    const byBranch: Record<string, string[]> = {};
+    const isManagerRole = (role: unknown) => {
+      const normalized = String(role ?? '').toUpperCase();
+      return normalized === 'BRANCH_MANAGER' || normalized === 'MANAGER';
+    };
+
+    branches.forEach((branch) => {
+      const managerNames = staff
+        .filter((member) =>
+          member.status === 'ACTIVE' &&
+          Boolean(member.branchId) &&
+          isManagerRole(member.role) &&
+          branchIdsMatch(member.branchId, branch.id)
+        )
+        .map((member) => member.name);
+
+      byBranch[branch.id] = managerNames;
+    });
+
+    return byBranch;
+  }, [branches, staff]);
 
   const handleEditClick = (branch: Branch) => {
     setCurrentBranch(branch);
@@ -256,13 +280,15 @@ const Branches: React.FC<BranchesProps> = ({ branches, onUpdateBranches, onAddBr
               </tr>
            </thead>
            <tbody className="divide-y divide-slate-100">
-              {displayBranches.map((branch) => (
+              {tableBranches.map((branch) => (
                 <tr key={branch.id} className="hover:bg-slate-50">
                    <td className="px-6 py-4">
                      <div className="flex items-center gap-2">
                        <div className="font-bold text-slate-800">{branch.name}</div>
                        {branch.isHeadOffice && (
-                         <Crown size={16} className="text-amber-500" title="Head Office" />
+                         <span title="Head Office">
+                           <Crown size={16} className="text-amber-500" />
+                         </span>
                        )}
                      </div>
                      <div className="text-xs text-slate-400">ID: {branch.id}</div>
@@ -272,7 +298,7 @@ const Branches: React.FC<BranchesProps> = ({ branches, onUpdateBranches, onAddBr
                      {branch.location}
                    </td>
                    <td className="px-6 py-4 text-sm font-medium text-slate-700">
-                     {branch.manager}
+                     {managerNamesByBranchId[branch.id]?.join(', ') || branch.manager || 'Unassigned'}
                    </td>
                    <td className="px-6 py-4">
                       {branch.status === 'ACTIVE' ? (

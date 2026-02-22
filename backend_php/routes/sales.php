@@ -36,7 +36,7 @@ function getSales() {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'CASHIER']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'CASHIER', 'AUDITOR']);
         $stmt = $pdo->query('SELECT * FROM sales ORDER BY created_at DESC LIMIT 500');
         $sales = $stmt->fetchAll();
 
@@ -66,7 +66,7 @@ function getSalesHistory() {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'CASHIER']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'CASHIER', 'AUDITOR']);
         $branchId = $_GET['branchId'] ?? null;
 
         $query = 'SELECT * FROM sales WHERE 1=1';
@@ -402,7 +402,7 @@ function getSaleDetails($saleId) {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'CASHIER']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'CASHIER', 'AUDITOR']);
 
         // Get sale header
         $stmt = $pdo->prepare('SELECT * FROM sales WHERE id = ?');
@@ -459,7 +459,7 @@ function getSalesSummary() {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'CASHIER']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'CASHIER', 'AUDITOR']);
 
         $branchId = $_GET['branchId'] ?? null;
         $startDate = $_GET['startDate'] ?? null;

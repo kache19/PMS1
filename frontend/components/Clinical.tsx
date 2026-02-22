@@ -18,51 +18,8 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 import { useNotifications } from './NotificationContext';
-
-// Type Definitions
-interface Patient {
-  id: string;
-  name: string;
-  age?: number;
-  gender: 'Male' | 'Female' | 'Other';
-  phone: string;
-  email: string;
-  address: string;
-  emergencyContact: string;
-  emergencyPhone: string;
-  allergies: string[];
-  medicalConditions: string[];
-  currentMedications: string[];
-  branchId: string;
-  lastVisit: string;
-}
-
-interface PrescriptionItem {
-  medicationName: string;
-  dosage: string;
-  frequency: string;
-  duration: string;
-  quantityPrescribed: number;
-  instructions?: string;
-}
-
-interface Prescription {
-  id: string;
-  patientId: string;
-  doctorName: string;
-  diagnosis: string;
-  notes: string;
-  status: 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
-  branchId: string;
-  items: PrescriptionItem[];
-}
-
-interface Branch {
-  id: string;
-  name: string;
-  location: string;
-  manager: string;
-}
+import type { Patient, Prescription, PrescriptionItem, Branch } from '../types';
+import { runWithPreservedWindowScroll } from '../utils/scrollStability';
 
 const Clinical: React.FC<{ currentBranchId: string }> = ({ currentBranchId }) => {
   const { showSuccess, showError } = useNotifications();
@@ -132,7 +89,9 @@ const Clinical: React.FC<{ currentBranchId: string }> = ({ currentBranchId }) =>
   // Load data on mount and set up polling
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 30000); // Poll every 30 seconds
+    const interval = setInterval(() => {
+      void runWithPreservedWindowScroll(() => loadData());
+    }, 30000); // Poll every 30 seconds
     return () => clearInterval(interval);
   }, []);
 

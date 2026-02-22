@@ -359,4 +359,5 @@ function handleResetPassword() {
         echo json_encode(['error' => 'Server error']);
     }
 }
+
 ?>

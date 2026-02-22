@@ -14,7 +14,8 @@ import {
   LoginTracker,
   CartItem,
   PaymentMethod,
-  Entity
+  Entity,
+  Shipment
 } from '../types';
 
 // Use explicit env override when provided; otherwise choose a sensible default
@@ -32,6 +33,66 @@ const getApiUrl = () => {
 
 export const API_URL = getApiUrl();
 const REQUEST_TIMEOUT = 30000; // 30 seconds
+const normalizeUserRole = (role: unknown) => {
+  const key = String(role ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (key === 'SUPERADMIN') return 'SUPER_ADMIN';
+  if (key === 'BRANCHMANAGER') return 'BRANCH_MANAGER';
+  if (key === 'PHARMACIST') return 'PHARMACIST';
+  if (key === 'DISPENSER') return 'DISPENSER';
+  if (key === 'STOREKEEPER') return 'STOREKEEPER';
+  if (key === 'INVENTORYCONTROLLER') return 'INVENTORY_CONTROLLER';
+  if (key === 'ACCOUNTANT') return 'ACCOUNTANT';
+  if (key === 'AUDITOR') return 'AUDITOR';
+  return String(role ?? '');
+};
+
+const normalizeStaffUser = (user: any): Staff => ({
+  ...user,
+  id: String(user?.id ?? ''),
+  branchId: user?.branchId ?? user?.branch_id ?? undefined,
+  role: normalizeUserRole(user?.role) as Staff['role']
+});
+
+const normalizeShipment = (row: any): Shipment => {
+  const rawItems = row?.items;
+  let items: Array<{ productId: string; productName: string; quantity: number }> = [];
+  if (Array.isArray(rawItems)) {
+    items = rawItems.map((item: any) => ({
+      productId: String(item?.productId ?? item?.product_id ?? ''),
+      productName: String(item?.productName ?? item?.product_name ?? ''),
+      quantity: Number(item?.quantity ?? 0)
+    }));
+  } else if (typeof rawItems === 'string') {
+    try {
+      const parsed = JSON.parse(rawItems);
+      if (Array.isArray(parsed)) {
+        items = parsed.map((item: any) => ({
+          productId: String(item?.productId ?? item?.product_id ?? ''),
+          productName: String(item?.productName ?? item?.product_name ?? ''),
+          quantity: Number(item?.quantity ?? 0)
+        }));
+      }
+    } catch {
+      items = [];
+    }
+  }
+
+  return {
+    id: String(row?.id ?? ''),
+    transferId: row?.transferId ?? row?.transfer_id ?? null,
+    fromBranchId: String(row?.fromBranchId ?? row?.from_branch_id ?? ''),
+    toBranchId: String(row?.toBranchId ?? row?.to_branch_id ?? ''),
+    status: String(row?.status ?? 'PENDING').toUpperCase() as Shipment['status'],
+    verificationCode: String(row?.verificationCode ?? row?.verification_code ?? ''),
+    totalValue: Number(row?.totalValue ?? row?.total_value ?? 0),
+    notes: row?.notes ?? '',
+    createdBy: String(row?.createdBy ?? row?.created_by ?? ''),
+    approvedBy: row?.approvedBy ?? row?.approved_by ?? undefined,
+    createdAt: String(row?.createdAt ?? row?.created_at ?? ''),
+    approvedAt: row?.approvedAt ?? row?.approved_at ?? undefined,
+    items
+  };
+};
 
 /**
  * Enhanced fetch with timeout, error handling, and automatic retry
@@ -73,17 +134,38 @@ async function fetchJSON(path: string, options: RequestInit = {}) {
       return null;
     }
 
-    // Handle 401 Unauthorized - dispatch event for app to handle (no page refresh)
-    if (res.status === 401) {
-      localStorage.removeItem('authToken');
-      localStorage.removeItem('user');
-      sessionStorage.removeItem('authToken');
-      sessionStorage.removeItem('user');
-      // Dispatch custom event instead of page refresh
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('pms:auth-expired', { detail: { message: 'Session expired. Please login again.' } }));
+    // Handle 401/403 auth failures - dispatch event for app to handle (no page refresh)
+    if (res.status === 401 || res.status === 403) {
+      let authMessage = res.status === 401 ? 'Unauthorized. Please login again.' : 'Session expired. Please login again.';
+      try {
+        const errorBody = await res.clone().json();
+        const serverMessage = String(errorBody?.error || errorBody?.message || '');
+        if (serverMessage) authMessage = serverMessage;
+      } catch {
+        const textBody = await res.clone().text().catch(() => '');
+        if (textBody) authMessage = textBody;
       }
-      throw new Error('Unauthorized. Please login again.');
+
+      const lowerMsg = authMessage.toLowerCase();
+      const isAuthFailure =
+        res.status === 401
+        || lowerMsg.includes('token')
+        || lowerMsg.includes('unauthorized')
+        || lowerMsg.includes('session')
+        || lowerMsg.includes('expired');
+
+      if (!isAuthFailure) {
+        // Fall through to normal non-auth error handling
+      } else {
+        localStorage.removeItem('authToken');
+        localStorage.removeItem('user');
+        sessionStorage.removeItem('authToken');
+        sessionStorage.removeItem('user');
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('pms:auth-expired', { detail: { message: authMessage } }));
+        }
+        throw new Error(authMessage);
+      }
     }
 
     // Handle other errors
@@ -130,10 +212,14 @@ async function fetchJSON(path: string, options: RequestInit = {}) {
  * Login user and store auth token
  */
 export const login = async (username: string, password: string) => {
-  return fetchJSON('auth/login', {
+  const result = await fetchJSON('auth/login', {
     method: 'POST',
     body: JSON.stringify({ username, password })
   });
+  if (result?.user) {
+    return { ...result, user: normalizeStaffUser(result.user) };
+  }
+  return result;
 };
 
 /**
@@ -152,7 +238,7 @@ function logout(): void {
 function getCurrentUser(): Staff | null {
   try {
     const userJson = localStorage.getItem('user') || sessionStorage.getItem('user');
-    return userJson ? JSON.parse(userJson) : null;
+    return userJson ? normalizeStaffUser(JSON.parse(userJson)) : null;
   } catch {
     return null;
   }
@@ -168,6 +254,8 @@ function isAuthenticated(): boolean {
 export const api = {
   // Auth
   login,
+  refreshToken: (): Promise<{ token: string }> =>
+    fetchJSON('auth/refresh', { method: 'POST' }),
   logout,
   getCurrentUser,
   isAuthenticated,
@@ -281,6 +369,12 @@ export const api = {
 
    verifyTransferByController: (id: string): Promise<StockTransfer> =>
      fetchJSON(`inventory/transfers/${id}/verify-controller`, { method: 'POST' }),
+
+   rejectTransfer: (id: string, payload: { step: 'KEEPER' | 'CONTROLLER'; reason?: string }): Promise<StockTransfer> =>
+     fetchJSON(`inventory/transfers/${id}/reject`, {
+       method: 'POST',
+       body: JSON.stringify(payload)
+     }),
 
   // Sales
   getSales: (): Promise<Sale[]> =>
@@ -579,14 +673,22 @@ export const api = {
      fetchJSON(path.startsWith('/') ? path.substring(1) : path, options),
 
   // Shipments
-  getShipments: (): Promise<any[]> =>
-    fetchJSON('shipments').catch(() => []),
+  getShipments: (): Promise<Shipment[]> =>
+    fetchJSON('shipments')
+      .then((rows: any[]) => (Array.isArray(rows) ? rows.map(normalizeShipment) : []))
+      .catch(() => []),
 
-  getShipment: (id: string): Promise<any | null> =>
-    fetchJSON(`shipments/${id}`).catch(() => null),
+  getShipment: (id: string): Promise<Shipment | null> =>
+    fetchJSON(`shipments/${id}`).then(normalizeShipment).catch(() => null),
 
   createShipment: (payload: any): Promise<any> =>
     fetchJSON('shipments', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+
+  createDirectShipment: (payload: any): Promise<any> =>
+    fetchJSON('shipments?action=create-direct', {
       method: 'POST',
       body: JSON.stringify(payload)
     }),
@@ -643,8 +745,30 @@ export const api = {
     supplierName?: string;
     restockStatus?: string;
     lastRestockDate?: string;
+    costPrice?: number;
+    sellingPrice?: number;
   }) => {
     return fetchJSON('inventory/addStock', {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  },
+
+  addStockBulk: async (data: {
+    branchId: string;
+    supplierId?: string;
+    supplierName?: string;
+    restockStatus?: string;
+    items: Array<{
+      productId: string;
+      batchNumber: string;
+      expiryDate: string;
+      quantity: number;
+      costPrice?: number;
+      sellingPrice?: number;
+    }>;
+  }) => {
+    return fetchJSON('inventory/addStockBulk', {
       method: 'POST',
       body: JSON.stringify(data)
     });

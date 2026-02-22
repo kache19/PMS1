@@ -10,13 +10,16 @@ import {
   RotateCcw
 } from "lucide-react";
 import { api } from "../services/api";
-import type { Branch, Invoice, Expense } from "../types";
+import { UserRole } from "../types";
+import type { Branch, Invoice, Expense, Staff } from "../types";
+import { runWithPreservedWindowScroll } from '../utils/scrollStability';
 
 interface ArchiveProps {
   currentBranchId: string;
   invoices: Invoice[];
   expenses: Expense[];
-  onRestore: (type: 'invoice' | 'expense', id: string) => void;
+  currentUser?: Staff | null;
+  onRestore: (type: 'invoice' | 'expense', id: string | number) => void;
   onAutoArchive: (months: number) => void;
   onRefresh?: () => void;
 }
@@ -25,6 +28,7 @@ const ArchiveManager: React.FC<ArchiveProps> = ({
   currentBranchId,
   invoices = [],
   expenses = [],
+  currentUser,
   onRestore,
   onAutoArchive,
   onRefresh
@@ -51,28 +55,29 @@ const ArchiveManager: React.FC<ArchiveProps> = ({
   useEffect(() => {
     if (!onRefresh) return;
     const interval = setInterval(() => {
-      onRefresh();
+      void runWithPreservedWindowScroll(() => onRefresh());
     }, 30000); // Poll every 30 seconds
     return () => clearInterval(interval);
   }, [onRefresh]);
 
   const currentBranch = branches.find(b => b.id === currentBranchId);
   const isHeadOffice = currentBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';
+  const isAuditor = currentUser?.role === UserRole.AUDITOR;
 
   // Filter Logic: Only show ARCHIVED items
   const archivedInvoices = (invoices || []).filter(i => {
       const isArchived = i.archived === true;
-      const matchBranch = isHeadOffice ? true : i.branchId === currentBranchId;
-      const matchSearch = (i.customerName?.toLowerCase() || '').includes(searchTerm.toLowerCase()) || 
-                          (i.id?.toLowerCase() || '').includes(searchTerm.toLowerCase());
+      const matchBranch = (isHeadOffice || isAuditor) ? true : i.branchId === currentBranchId;
+      const matchSearch = (String(i.customerName ?? '').toLowerCase()).includes(searchTerm.toLowerCase()) || 
+                          (String(i.id ?? '').toLowerCase()).includes(searchTerm.toLowerCase());
       return isArchived && matchBranch && matchSearch;
   });
 
   const archivedExpenses = (expenses || []).filter(e => {
       const isArchived = e.archived === true;
-      const matchBranch = isHeadOffice ? true : e.branchId === currentBranchId;
-      const matchSearch = (e.description?.toLowerCase() || '').includes(searchTerm.toLowerCase()) || 
-                          (e.category?.toLowerCase() || '').includes(searchTerm.toLowerCase());
+      const matchBranch = (isHeadOffice || isAuditor) ? true : e.branchId === currentBranchId;
+      const matchSearch = (String(e.description ?? '').toLowerCase()).includes(searchTerm.toLowerCase()) || 
+                          (String(e.category ?? '').toLowerCase()).includes(searchTerm.toLowerCase());
       return isArchived && matchBranch && matchSearch;
   });
 
@@ -103,7 +108,7 @@ const ArchiveManager: React.FC<ArchiveProps> = ({
                 className="text-sm bg-white border border-slate-200 rounded-lg py-1 px-2 focus:outline-none focus:ring-2 focus:ring-teal-500"
                 value={autoArchiveMonth}
                 onChange={(e) => setAutoArchiveMonth(parseInt(e.target.value))}
-                disabled={isLoading}
+                disabled={isLoading || isAuditor}
             >
                 <option value={3}>Older than 3 Months</option>
                 <option value={6}>Older than 6 Months</option>
@@ -111,7 +116,7 @@ const ArchiveManager: React.FC<ArchiveProps> = ({
             </select>
             <button 
                 onClick={handleAutoArchive}
-                disabled={isLoading}
+                disabled={isLoading || isAuditor}
                 className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 text-white rounded-lg hover:bg-slate-900 font-bold text-xs shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
                 <Archive size={14} /> {isLoading ? 'Running...' : 'Run Now'}
@@ -190,16 +195,20 @@ const ArchiveManager: React.FC<ArchiveProps> = ({
                                               </span>
                                           </td>
                                           <td className="px-6 py-4 text-center">
-                                              <button 
-                                                onClick={() => {
-                                                  if (window.confirm(`Restore invoice ${inv.id}?`)) {
-                                                    onRestore('invoice', inv.id);
-                                                  }
-                                                }}
-                                                className="text-teal-600 hover:text-teal-800 hover:bg-teal-50 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1 mx-auto"
-                                              >
-                                                  <RotateCcw size={14} /> Restore
-                                              </button>
+                                              {!isAuditor ? (
+                                                <button 
+                                                  onClick={() => {
+                                                    if (window.confirm(`Restore invoice ${inv.id}?`)) {
+                                                      onRestore('invoice', inv.id);
+                                                    }
+                                                  }}
+                                                  className="text-teal-600 hover:text-teal-800 hover:bg-teal-50 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1 mx-auto"
+                                                >
+                                                    <RotateCcw size={14} /> Restore
+                                                </button>
+                                              ) : (
+                                                <span className="text-xs text-slate-400 font-semibold">Read-only</span>
+                                              )}
                                           </td>
                                       </tr>
                                   ))}
@@ -246,16 +255,20 @@ const ArchiveManager: React.FC<ArchiveProps> = ({
                                               {branches.find(b => b.id === exp.branchId)?.name || 'Unknown'}
                                           </td>
                                           <td className="px-6 py-4 text-center">
-                                              <button 
-                                                onClick={() => {
-                                                  if (window.confirm(`Restore expense ${exp.id}?`)) {
-                                                    onRestore('expense', exp.id);
-                                                  }
-                                                }}
-                                                className="text-teal-600 hover:text-teal-800 hover:bg-teal-50 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1 mx-auto"
-                                              >
-                                                  <RotateCcw size={14} /> Restore
-                                              </button>
+                                              {!isAuditor ? (
+                                                <button 
+                                                  onClick={() => {
+                                                    if (window.confirm(`Restore expense ${exp.id}?`)) {
+                                                      onRestore('expense', exp.id);
+                                                    }
+                                                  }}
+                                                  className="text-teal-600 hover:text-teal-800 hover:bg-teal-50 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1 mx-auto"
+                                                >
+                                                    <RotateCcw size={14} /> Restore
+                                                </button>
+                                              ) : (
+                                                <span className="text-xs text-slate-400 font-semibold">Read-only</span>
+                                              )}
                                           </td>
                                       </tr>
                                   ))}

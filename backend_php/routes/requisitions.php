@@ -12,46 +12,155 @@ function getMainBranchId() {
     return $branch ? $branch['id'] : 'HEAD_OFFICE';
 }
 
-function generateNextShipmentInvoiceNumber() {
+function getNextRequisitionShipmentInvoiceSequence(string $prefix): int {
     global $pdo;
-    $prefix = "INV-SHIP-";
-    
-    // Find the highest number for shipment invoices
-    $stmt = $pdo->prepare("SELECT id FROM invoices WHERE id LIKE ? ORDER BY id DESC LIMIT 1");
-    $stmt->execute([$prefix . '%']);
-    $lastInvoice = $stmt->fetch();
-    
-    if ($lastInvoice) {
-        // Extract the number part and increment
-        $lastNumber = (int)substr($lastInvoice['id'], strlen($prefix));
-        $nextNumber = $lastNumber + 1;
-    } else {
-        $nextNumber = 1;
-    }
-    
-    // Format with leading zeros to 4 digits
-    return $prefix . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+
+    $startPos = strlen($prefix) + 1;
+    $regex = '^' . preg_quote($prefix, '/') . '[0-9]{4}$';
+    $stmt = $pdo->prepare("
+        SELECT COALESCE(MAX(CAST(SUBSTRING(id, ?) AS UNSIGNED)), 0) AS max_num
+        FROM invoices
+        WHERE id REGEXP ?
+    ");
+    $stmt->execute([$startPos, $regex]);
+    $row = $stmt->fetch();
+
+    return ((int)($row['max_num'] ?? 0)) + 1;
 }
 
-function generateNextShipmentReceiveInvoiceNumber() {
+function generateNextShipmentInvoiceNumber() {
+    $prefix = "INV-SHIP-";
+    $nextNumber = getNextRequisitionShipmentInvoiceSequence($prefix);
+    return $prefix . str_pad((string)$nextNumber, 4, '0', STR_PAD_LEFT);
+}
+
+function generateNextRequisitionRequestInvoiceNumber(): string {
+    $prefix = "INV-REQ-";
+    $nextNumber = getNextRequisitionShipmentInvoiceSequence($prefix);
+    return $prefix . str_pad((string)$nextNumber, 4, '0', STR_PAD_LEFT);
+}
+
+function generateNextRequisitionTransferId(): string {
     global $pdo;
-    $prefix = "INV-RECV-";
-    
-    // Find the highest number for receive invoices
-    $stmt = $pdo->prepare("SELECT id FROM invoices WHERE id LIKE ? ORDER BY id DESC LIMIT 1");
-    $stmt->execute([$prefix . '%']);
-    $lastInvoice = $stmt->fetch();
-    
-    if ($lastInvoice) {
-        // Extract the number part and increment
-        $lastNumber = (int)substr($lastInvoice['id'], strlen($prefix));
-        $nextNumber = $lastNumber + 1;
-    } else {
-        $nextNumber = 1;
+
+    $stmt = $pdo->query("
+        SELECT COALESCE(MAX(
+            CASE
+                WHEN id REGEXP '^TRANS-[0-9]+$' THEN CAST(SUBSTRING(id, 7) AS UNSIGNED)
+                WHEN id REGEXP '^[0-9]+$' THEN CAST(id AS UNSIGNED)
+                ELSE 0
+            END
+        ), 0) AS max_num
+        FROM stock_transfers
+    ");
+    $row = $stmt->fetch();
+    $nextNumber = ((int)($row['max_num'] ?? 0)) + 1;
+    return 'TRANS-' . str_pad((string)$nextNumber, 4, '0', STR_PAD_LEFT);
+}
+
+function generateNextRequisitionShipmentId(): string {
+    global $pdo;
+
+    $stmt = $pdo->query("
+        SELECT COALESCE(MAX(CAST(id AS UNSIGNED)), 0) AS max_num
+        FROM shipments
+        WHERE id REGEXP '^[0-9]+$'
+    ");
+    $row = $stmt->fetch();
+    $nextNumber = ((int)($row['max_num'] ?? 0)) + 1;
+    return str_pad((string)$nextNumber, 4, '0', STR_PAD_LEFT);
+}
+
+function requisitionInvoicesHasColumn(string $columnName): bool {
+    global $pdo;
+    static $columnCache = [];
+
+    if (array_key_exists($columnName, $columnCache)) {
+        return $columnCache[$columnName];
     }
-    
-    // Format with leading zeros to 4 digits
-    return $prefix . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+
+    $stmt = $pdo->prepare("
+        SELECT COUNT(*) AS c
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'invoices'
+          AND COLUMN_NAME = ?
+    ");
+    $stmt->execute([$columnName]);
+    $result = $stmt->fetch();
+    $columnCache[$columnName] = ((int)($result['c'] ?? 0) > 0);
+
+    return $columnCache[$columnName];
+}
+
+function insertRequisitionShipmentInvoice(
+    string $invoiceId,
+    string $branchId,
+    string $customerName,
+    float $totalValue,
+    ?string $description,
+    string $itemsJson
+): void {
+    global $pdo;
+
+    $hasCustomerPhone = requisitionInvoicesHasColumn('customer_phone');
+    if ($hasCustomerPhone) {
+        $stmt = $pdo->prepare('
+            INSERT INTO invoices
+              (id, branch_id, customer_name, customer_phone, total_amount, paid_amount, status, due_date, description, source, items, archived, created_at)
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ');
+        $ok = $stmt->execute([$invoiceId, $branchId, $customerName, '', $totalValue, 0, 'UNPAID', null, $description, 'SHIPMENT', $itemsJson, 0]);
+    } else {
+        $stmt = $pdo->prepare('
+            INSERT INTO invoices
+              (id, branch_id, customer_name, total_amount, paid_amount, status, due_date, description, source, items, archived, created_at)
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ');
+        $ok = $stmt->execute([$invoiceId, $branchId, $customerName, $totalValue, 0, 'UNPAID', null, $description, 'SHIPMENT', $itemsJson, 0]);
+    }
+
+    if (!$ok) {
+        $err = $stmt->errorInfo();
+        throw new Exception('Failed to create requisition shipment invoice: ' . json_encode($err));
+    }
+}
+
+function insertRequisitionRequestInvoice(
+    string $invoiceId,
+    string $branchId,
+    string $customerName,
+    float $totalValue,
+    ?string $description,
+    string $itemsJson
+): void {
+    global $pdo;
+
+    $hasCustomerPhone = requisitionInvoicesHasColumn('customer_phone');
+    if ($hasCustomerPhone) {
+        $stmt = $pdo->prepare('
+            INSERT INTO invoices
+              (id, branch_id, customer_name, customer_phone, total_amount, paid_amount, status, due_date, description, source, items, archived, created_at)
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ');
+        $ok = $stmt->execute([$invoiceId, $branchId, $customerName, '', $totalValue, 0, 'UNPAID', null, $description, 'REQUISITION', $itemsJson, 0]);
+    } else {
+        $stmt = $pdo->prepare('
+            INSERT INTO invoices
+              (id, branch_id, customer_name, total_amount, paid_amount, status, due_date, description, source, items, archived, created_at)
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ');
+        $ok = $stmt->execute([$invoiceId, $branchId, $customerName, $totalValue, 0, 'UNPAID', null, $description, 'REQUISITION', $itemsJson, 0]);
+    }
+
+    if (!$ok) {
+        $err = $stmt->errorInfo();
+        throw new Exception('Failed to create requisition request invoice: ' . json_encode($err));
+    }
 }
 
 $method = $_SERVER['REQUEST_METHOD'];
@@ -66,7 +175,7 @@ switch ($method) {
         }
         break;
     case 'POST':
-        if ($id && $_GET['action'] === 'initiate-shipment') {
+        if ($id && (($_GET['action'] ?? null) === 'initiate-shipment')) {
             initiateShipment($id);
         } else {
             createRequisition();
@@ -86,7 +195,7 @@ function getRequisitions() {
     global $pdo;
 
     try {
-        $user = authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER']);
+        $user = authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'STOREKEEPER']);
 
         // Build query based on user role
         $query = 'SELECT * FROM stock_requisitions';
@@ -153,7 +262,7 @@ function getRequisition($id) {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'STOREKEEPER']);
         $stmt = $pdo->prepare('SELECT * FROM stock_requisitions WHERE id = ?');
         $stmt->execute([$id]);
         $requisition = $stmt->fetch();
@@ -185,24 +294,63 @@ function createRequisition() {
         $notes = $input['notes'] ?? '';
         $priority = $input['priority'] ?? 'NORMAL';
 
+        if (empty($branchId) || empty($requestedBy) || !is_array($items) || count($items) === 0) {
+            http_response_code(400);
+            echo json_encode(['error' => 'branchId, requestedBy and at least one item are required']);
+            return;
+        }
+
+        $pdo->beginTransaction();
+
+        // Keep legacy REQ-* format for requisition IDs to avoid breaking existing references.
         $requisitionId = 'REQ-' . time();
 
         $stmt = $pdo->prepare('INSERT INTO stock_requisitions (id, branch_id, requested_by, status, total_items, notes, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())');
         $stmt->execute([$requisitionId, $branchId, $requestedBy, 'PENDING', count($items), $notes, $priority]);
 
-        // Insert requisition items
-        if (!empty($items)) {
-            $itemStmt = $pdo->prepare('INSERT INTO stock_requisition_items (requisition_id, product_id, quantity_requested, notes, created_at) VALUES (?, ?, ?, ?, NOW())');
-            foreach ($items as $item) {
-                $itemStmt->execute([$requisitionId, $item['productId'], $item['quantityRequested'], $item['notes'] ?? '']);
+        // Insert requisition items + build invoice line items from product prices.
+        $itemStmt = $pdo->prepare('INSERT INTO stock_requisition_items (requisition_id, product_id, quantity_requested, notes, created_at) VALUES (?, ?, ?, ?, NOW())');
+        $productStmt = $pdo->prepare('SELECT name, base_price FROM products WHERE id = ? LIMIT 1');
+        $invoiceItems = [];
+        foreach ($items as $item) {
+            $productId = $item['productId'] ?? '';
+            $quantityRequested = (int)($item['quantityRequested'] ?? 0);
+            if ($productId === '' || $quantityRequested <= 0) {
+                throw new Exception('Invalid requisition item payload');
             }
+            $itemStmt->execute([$requisitionId, $productId, $quantityRequested, $item['notes'] ?? '']);
+
+            $productStmt->execute([$productId]);
+            $product = $productStmt->fetch(PDO::FETCH_ASSOC) ?: ['name' => $productId, 'base_price' => 0];
+            $unitPrice = (float)($product['base_price'] ?? 0);
+            $invoiceItems[] = [
+                'productId' => $productId,
+                'name' => $product['name'] ?? $productId,
+                'quantity' => $quantityRequested,
+                'price' => $unitPrice,
+                'total' => $quantityRequested * $unitPrice
+            ];
         }
+
+        $totalValue = array_reduce($invoiceItems, function($sum, $line) {
+            return $sum + ((float)($line['total'] ?? 0));
+        }, 0.0);
+        $invoiceId = generateNextRequisitionRequestInvoiceNumber();
+        $description = 'Stock Requisition Invoice - Requisition ID: ' . $requisitionId;
+        $customerName = 'Stock Requisition - Branch ' . $branchId;
+        insertRequisitionRequestInvoice($invoiceId, $branchId, $customerName, $totalValue, $description, json_encode($invoiceItems));
+
+        $pdo->commit();
 
         echo json_encode([
             'id' => $requisitionId,
-            'message' => 'Requisition created successfully'
+            'invoiceId' => $invoiceId,
+            'message' => 'Requisition created successfully with invoice'
         ]);
     } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
         error_log('Failed to create requisition: ' . $e->getMessage());
         http_response_code(500);
         echo json_encode(['error' => 'Failed to create requisition']);
@@ -336,7 +484,7 @@ function initiateShipment($requisitionId) {
             $stmt->execute(['APPROVED', $user['id'] ?? null, $requisitionId]);
 
             // Create transfer with item details
-            $transferId = 'TRANSFER-' . time();
+            $transferId = generateNextRequisitionTransferId();
             $transferItems = array_map(function($item) {
                 return [
                     'productId' => $item['productId'],
@@ -384,34 +532,26 @@ function initiateShipment($requisitionId) {
             $toBranchName = $toBranch ? $toBranch['name'] : $branchId;
 
             // Create shipment with PENDING status (awaiting verification)
-            $shipmentId = 'SHIP-' . time();
+            $shipmentId = generateNextRequisitionShipmentId();
             $verificationCode = null;
 
             $stmt = $pdo->prepare('INSERT INTO shipments (id, transfer_id, from_branch_id, to_branch_id, status, verification_code, total_value, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
             $stmt->execute([$shipmentId, $transferId, $mainBranchId, $branchId, 'PENDING', $verificationCode, $totalValue, $notes, $user['id'] ?? null]);
 
-            // Create invoices for both branches
+            // Create a single shipment invoice (INV-SHIP-*) per initiated shipment.
             $baseDesc = "Shipment Invoice - Shipment ID: {$shipmentId} (Transfer: {$transferId})";
             $customerName = "Branch Transfer: {$fromBranchName} to {$toBranchName}";
-
-            // From-branch invoice
-            $invoiceIdFrom = generateNextShipmentInvoiceNumber();
-            $stmt = $pdo->prepare('INSERT INTO invoices (id, branch_id, customer_name, total_amount, paid_amount, status, due_date, description, source, items, archived, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
-            $stmt->execute([$invoiceIdFrom, $mainBranchId, $customerName, $totalValue, 0, 'UNPAID', null, $baseDesc, 'SHIPMENT', json_encode($invoiceItems), 0]);
-
-            // To-branch invoice (so receiving branch also sees the invoice)
-            $invoiceIdTo = generateNextShipmentReceiveInvoiceNumber();
-            $stmt->execute([$invoiceIdTo, $branchId, $customerName, $totalValue, 0, 'UNPAID', null, $baseDesc, 'SHIPMENT', json_encode($invoiceItems), 0]);
+            $invoiceId = generateNextShipmentInvoiceNumber();
+            insertRequisitionShipmentInvoice($invoiceId, $mainBranchId, $customerName, $totalValue, $baseDesc, json_encode($invoiceItems));
 
             $pdo->commit();
 
             echo json_encode([
-                'message' => 'Shipment initiated successfully with invoices',
+                'message' => 'Shipment initiated successfully with invoice',
                 'transferId' => $transferId,
                 'shipmentId' => $shipmentId,
                 'requisitionId' => $requisitionId,
-                'invoiceFromId' => $invoiceIdFrom,
-                'invoiceToId' => $invoiceIdTo,
+                'invoiceId' => $invoiceId,
                 'validationWarnings' => $validationWarnings,
                 'status' => 'PENDING_VERIFICATION',
                 'notes' => 'Shipment is pending verification by storekeeper and inventory controller'

@@ -81,8 +81,23 @@ export interface BranchInventoryItem {
   lastRestockDate?: string;
 }
 
-export interface CartItem extends Product {
+export interface CartItem {
+  id: string;
+  productId?: string;
+  productName?: string;
+  name: string;
+  genericName?: string;
+  category?: string;
+  unit?: string;
+  minStockLevel?: number;
+  batches?: DrugBatch[];
+  requiresPrescription?: boolean;
+  totalStock?: number;
+  baseStock?: number;
+  pendingIncoming?: number;
   quantity: number;
+  price: number;
+  costPrice: number;
   selectedBatch: string;
   discount: number;
 }
@@ -107,7 +122,7 @@ export interface InteractionResult {
 }
 
 // Stock Transfer Types
-export type TransferStatus = 'IN_TRANSIT' | 'COMPLETED' | 'REJECTED';
+export type TransferStatus = 'IN_TRANSIT' | 'RECEIVED_KEEPER' | 'COMPLETED' | 'REJECTED';
 
 export interface TransferItem {
   productId: string;
@@ -177,7 +192,7 @@ export interface DisposalRequest {
   branchId: string;
   requestedBy: string;
   date: string;
-  status: 'PENDING' | 'APPROVED' | 'COMPLETED';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'COMPLETED';
   items: {
     productId: string;
     productName: string;
@@ -212,10 +227,12 @@ export interface Invoice {
   paidAmount: number;
   status: 'PAID' | 'PARTIAL' | 'UNPAID' | 'OVERDUE';
   description: string;
-  source: 'POS' | 'MANUAL'; // Logic to distinguish Proforma from Manual Invoice
+  source: 'POS' | 'MANUAL' | 'SHIPMENT' | 'RESTOCK'; // Logic to distinguish Proforma from Manual Invoice
+  createdBy?: string;
   items?: CartItem[]; // Items from POS
   payments: InvoicePayment[];
   paymentMethod?: PaymentMethod; // Payment method for display
+  includeVAT?: boolean;
   archived?: boolean;
 }
 

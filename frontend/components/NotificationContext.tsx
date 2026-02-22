@@ -14,7 +14,7 @@ export interface Notification {
 
 interface NotificationContextType {
   notifications: Notification[];
-  addNotification: (notification: Omit<Notification, 'id'>) => void;
+  addNotification: (notification: Omit<Notification, 'id' | 'timestamp'>) => void;
   removeNotification: (id: string) => void;
   showSuccess: (title: string, message?: string, duration?: number) => void;
   showError: (title: string, message?: string, duration?: number) => void;
@@ -39,12 +39,16 @@ interface NotificationProviderProps {
 export const NotificationProvider: React.FC<NotificationProviderProps> = ({ children }) => {
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
-  const addNotification = useCallback((notification: Omit<Notification, 'id'>) => {
+  const addNotification = useCallback((notification: Omit<Notification, 'id' | 'timestamp'>) => {
     const id = Math.random().toString(36).substr(2, 9);
+    const fallbackDuration = notification.type === 'success' ? 1500 : 5000;
+    const rawDuration = Number(notification.duration);
+    const resolvedDuration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : fallbackDuration;
     const newNotification: Notification = {
       id,
-      duration: notification.duration || (notification.type === 'success' ? 1500 : 5000),
       ...notification,
+      timestamp: Date.now(),
+      duration: resolvedDuration,
     };
 
     setNotifications(prev => [...prev, newNotification]);

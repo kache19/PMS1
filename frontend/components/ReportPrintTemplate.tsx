@@ -37,7 +37,7 @@ const ReportPrintTemplate: React.FC<ReportPrintTemplateProps> = ({ report, compa
         <b>Summary:</b>
         <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
           {Object.entries(report.summary).map(([key, value]) => (
-            <li key={key}>{key}: {value}</li>
+            <li key={key}>{key}: {String(value)}</li>
           ))}
         </ul>
       </div>
@@ -54,7 +54,7 @@ const ReportPrintTemplate: React.FC<ReportPrintTemplateProps> = ({ report, compa
         {report.data && report.data.length > 0 ? report.data.map((row, idx) => (
           <tr key={idx} style={{ borderBottom: '1px solid #eee' }}>
             {Object.values(row).map((val, i) => (
-              <td key={i} style={{ padding: 8 }}>{val}</td>
+              <td key={i} style={{ padding: 8 }}>{String(val ?? '')}</td>
             ))}
           </tr>
         )) : (

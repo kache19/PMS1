@@ -31,12 +31,16 @@ import {
   BarChart3,
   Download,
   FileText,
-  Copy as DuplicateIcon
+  Copy as DuplicateIcon,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
-import { StockTransfer, Product, BranchInventoryItem, BatchStatus, StockRequisition, Staff, Branch, Sale } from '../types';
+import { StockTransfer, Product, BranchInventoryItem, BatchStatus, StockRequisition, Staff, Branch, Sale, UserRole, Entity, Shipment, DrugBatch, Invoice } from '../types';
 import { useNotifications } from './NotificationContext';
-import { api } from '../services/api';
+import { api, API_URL } from '../services/api';
 import { exportToExcel, exportToPDF } from '../services/exportService';
+import { getBranchDisplayName as formatBranchDisplayName } from '../utils/branchDisplay';
+import { generateBatchNumber } from '../utils/batchNumber';
 
 // Add safe format helpers to prevent calling toLocaleString on undefined
 const fmtNumber = (v?: number | null) => {
@@ -58,6 +62,34 @@ const fmtCurrency = (v?: number | null) => {
   } catch { return '0'; }
 };
 
+const normalizeShipmentStatus = (status?: string) => {
+  const value = (status || '').toUpperCase();
+  if (value === 'PENDING') return 'PENDING';
+  if (value === 'APPROVED') return 'APPROVED';
+  if (value === 'REJECTED') return 'REJECTED';
+  if (value === 'IN_TRANSIT') return 'IN_TRANSIT';
+  if (value === 'DELIVERED') return 'DELIVERED';
+  return 'PENDING';
+};
+
+const normalizeTransferStatus = (status?: string) => String(status || '').toUpperCase().replace(/\s+/g, '_');
+const normalizeIdKey = (value?: string | null) => String(value || '').trim().toUpperCase();
+const normalizeBranchId = (value: unknown) => String(value ?? '').trim();
+const branchIdVariants = (value: unknown) => {
+  const raw = normalizeBranchId(value).toUpperCase();
+  if (!raw) return [];
+  const variants = new Set<string>([raw]);
+  const prefixed = raw.match(/^BR0*(\d+)$/);
+  if (prefixed) variants.add(String(Number(prefixed[1])));
+  if (/^\d+$/.test(raw)) variants.add(`BR${raw.padStart(3, '0')}`);
+  return Array.from(variants);
+};
+const branchIdsMatch = (a: unknown, b: unknown) => {
+  const aVariants = branchIdVariants(a);
+  const bVariants = new Set(branchIdVariants(b));
+  return aVariants.some((id) => bVariants.has(id));
+};
+
 interface ExtendedProduct extends Product {
   customPrice?: number;
 }
@@ -72,7 +104,31 @@ interface InventoryProps {
     currentUser?: Staff | null;
     products: Product[];
     setProducts: React.Dispatch<React.SetStateAction<Product[]>>;
-    onAddStock?: (data: { branchId: string, productId: string, batchNumber: string, expiryDate: string, quantity: number }) => void;
+    onAddStock?: (data: {
+      branchId: string,
+      productId: string,
+      batchNumber: string,
+      expiryDate: string,
+      quantity: number,
+      supplierId?: string,
+      supplierName?: string,
+      costPrice?: number,
+      sellingPrice?: number
+    }) => Promise<void> | void;
+    onAddStockBulk?: (data: {
+      branchId: string,
+      supplierId?: string,
+      supplierName?: string,
+      restockStatus?: string,
+      items: Array<{
+        productId: string,
+        batchNumber: string,
+        expiryDate: string,
+        quantity: number,
+        costPrice?: number,
+        sellingPrice?: number
+      }>
+    }) => Promise<void> | void;
     onAddProduct?: (product: Product) => void;
     onUpdateProduct?: (product: Product) => void;
     onCreateTransfer?: (transfer: StockTransfer) => void;
@@ -91,6 +147,27 @@ interface NewStockForm {
   batchNumber: string;
   expiryDate: string;
   quantity: string;
+  supplierId?: string;
+  supplierName?: string;
+}
+
+interface RestockEntry {
+  productId: string;
+  quantity: number;
+  batchNumber: string;
+  expiryDate: string;
+  costPrice: number;
+  sellingPrice: number;
+  supplierId?: string;
+  supplierName?: string;
+}
+
+interface RestockExistingForm {
+  items: RestockEntry[];
+  supplierId: string;
+  supplierName: string;
+  isNewSupplier: boolean;
+  newSupplierName: string;
 }
 
 interface NewShipmentForm {
@@ -116,11 +193,30 @@ const Inventory: React.FC<InventoryProps> = ({
     setProducts,
     branches = [],
     onAddStock,
+    onAddStockBulk,
     onAddProduct,
     onUpdateProduct,
     onCreateTransfer
 }) => {
   const { showSuccess, showError, showWarning, showInfo } = useNotifications();
+  const refreshShipments = React.useCallback(async () => {
+    try {
+      const fetchedShipments = await api.getShipments();
+      setShipments(fetchedShipments);
+    } catch (error) {
+      console.error('Failed to refresh shipments:', error);
+    }
+  }, []);
+  const refreshRequisitions = React.useCallback(async () => {
+    try {
+      const fetchedRequisitions = await api.getRequisitions();
+      setRequestHistory(Array.isArray(fetchedRequisitions) ? fetchedRequisitions : []);
+    } catch (error) {
+      console.error('Failed to refresh requisitions:', error);
+    } finally {
+      setIsLoadingRequestHistory(false);
+    }
+  }, []);
 
   // Fetch products and inventory if not provided
   React.useEffect(() => {
@@ -138,6 +234,17 @@ const Inventory: React.FC<InventoryProps> = ({
           const fetchedTransfers = await api.getTransfers();
           setTransfers(fetchedTransfers);
         }
+        // Load shipments
+        await refreshShipments();
+        // Load requisition history for status tracking
+        await refreshRequisitions();
+        // Load saved entities that can be used as restock source names
+        const fetchedEntities = await api.getEntities({ status: 'ACTIVE' });
+        setSuppliers(
+          fetchedEntities.filter(
+            (entity) => entity.type === 'SUPPLIER' || entity.type === 'CUSTOMER' || entity.type === 'BOTH'
+          )
+        );
       } catch (error) {
         console.error('Failed to load inventory data:', error);
         showError('Data Load Error', 'Failed to load inventory data. Please refresh the page.');
@@ -145,20 +252,45 @@ const Inventory: React.FC<InventoryProps> = ({
     };
 
     loadData();
-  }, [currentBranchId, products.length, Object.keys(inventory).length, transfers.length, setProducts, setInventory, setTransfers, showError]);
+  }, [currentBranchId, products.length, Object.keys(inventory).length, transfers.length, setProducts, setInventory, setTransfers, showError, refreshShipments, refreshRequisitions]);
   const [activeTab, setActiveTab] = useState<'stock' | 'transfers'>('stock');
+  const [collapseCompletedIncoming, setCollapseCompletedIncoming] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [addMode, setAddMode] = useState<'EXISTING' | 'NEW'>('EXISTING');
+  const [suppliers, setSuppliers] = useState<Entity[]>([]);
+  const [shipments, setShipments] = useState<Shipment[]>([]);
+  const [restockExistingForm, setRestockExistingForm] = useState<RestockExistingForm>({
+    items: [],
+    supplierId: '',
+    supplierName: '',
+    isNewSupplier: false,
+    newSupplierName: ''
+  });
+  const [currentRestockItem, setCurrentRestockItem] = useState<Partial<RestockEntry>>({
+    productId: '',
+    quantity: 0,
+    batchNumber: '',
+    expiryDate: '',
+    costPrice: 0,
+    sellingPrice: 0
+  });
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [showVerifyModal, setShowVerifyModal] = useState(false);
+  const [showRejectModal, setShowRejectModal] = useState(false);
+  const [rejectTransferId, setRejectTransferId] = useState<string | null>(null);
+  const [rejectStep, setRejectStep] = useState<'KEEPER' | 'CONTROLLER'>('KEEPER');
+  const [rejectReason, setRejectReason] = useState('');
+  const [isRejectingTransfer, setIsRejectingTransfer] = useState(false);
   const [verifyStep, setVerifyStep] = useState<'KEEPER' | 'CONTROLLER'>('KEEPER');
   const [activeTransferId, setActiveTransferId] = useState<string | null>(null);
+  const [hasReviewedShipmentContents, setHasReviewedShipmentContents] = useState(false);
   const [verificationCode, setVerificationCode] = useState('');
   const [verifyError, setVerifyError] = useState('');
   const [isSyncingMSD, setIsSyncingMSD] = useState(false);
   const [showTransferSuccessModal, setShowTransferSuccessModal] = useState(false);
   const [createdTransfer, setCreatedTransfer] = useState<StockTransfer | null>(null);
+  const [createdShipmentMeta, setCreatedShipmentMeta] = useState<{ shipmentId?: string; invoiceId?: string } | null>(null);
   const [showViewCodesModal, setShowViewCodesModal] = useState(false);
   const [selectedTransferForCodes, setSelectedTransferForCodes] = useState<StockTransfer | null>(null);
   const [showBulkImportModal, setShowBulkImportModal] = useState(false);
@@ -171,6 +303,10 @@ const Inventory: React.FC<InventoryProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [stockFilter, setStockFilter] = useState('');
+  const [shipmentSearchQuery, setShipmentSearchQuery] = useState('');
+  const [shipmentStatusFilter, setShipmentStatusFilter] = useState<'ALL' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'IN_TRANSIT' | 'DELIVERED'>('ALL');
+  const [shipmentDirectionFilter, setShipmentDirectionFilter] = useState<'ALL' | 'INCOMING' | 'OUTGOING' | 'NETWORK'>('ALL');
+  const [shipmentSortBy, setShipmentSortBy] = useState<'NEWEST' | 'OLDEST' | 'VALUE_HIGH' | 'VALUE_LOW' | 'ITEMS_HIGH' | 'ITEMS_LOW'>('NEWEST');
   const [showProductDetailsModal, setShowProductDetailsModal] = useState(false);
   const [selectedProductForDetails, setSelectedProductForDetails] = useState<any>(null);
   const [showPriceModal, setShowPriceModal] = useState(false);
@@ -180,6 +316,20 @@ const Inventory: React.FC<InventoryProps> = ({
   const [showEditCostModal, setShowEditCostModal] = useState(false);
   const [showEditMinStockModal, setShowEditMinStockModal] = useState(false);
   const [editModalData, setEditModalData] = useState<{ product: any; field: string; value: string } | null>(null);
+  const [showRestockInvoicesModal, setShowRestockInvoicesModal] = useState(false);
+  const [restockInvoices, setRestockInvoices] = useState<Invoice[]>([]);
+  const [isLoadingRestockInvoices, setIsLoadingRestockInvoices] = useState(false);
+
+  // Auto-dismiss shipment success popup so success feedback never blocks the user.
+  React.useEffect(() => {
+    if (!showTransferSuccessModal || !createdTransfer) return;
+    const timeoutId = window.setTimeout(() => {
+      setShowTransferSuccessModal(false);
+      setCreatedTransfer(null);
+      setCreatedShipmentMeta(null);
+    }, 2500);
+    return () => window.clearTimeout(timeoutId);
+  }, [showTransferSuccessModal, createdTransfer]);
 
   const [newStock, setNewStock] = useState<NewStockForm>({
     productId: '',
@@ -202,20 +352,50 @@ const Inventory: React.FC<InventoryProps> = ({
   });
 
   const [requisitionItems, setRequisitionItems] = useState<any[]>([]);
+  const [requestHistory, setRequestHistory] = useState<any[]>([]);
+  const [isLoadingRequestHistory, setIsLoadingRequestHistory] = useState(true);
   const [currentItem, setCurrentItem] = useState<ShipmentItem>({
     productId: '',
     quantity: ''
   });
 
-  const currentBranch = branches.find(b => b.id === currentBranchId);
+  const findBranchById = (branchId: unknown) =>
+    branches.find((b) => branchIdsMatch(b.id, branchId));
+  const getBranchDisplayName = (branchId: unknown, fallback = 'Unknown Branch') =>
+    formatBranchDisplayName(branches, String(branchId || ''), fallback);
+  const currentBranch = findBranchById(currentBranchId);
   const isHeadOffice = currentBranch?.isHeadOffice || currentBranchId === 'HEAD_OFFICE';
-  const branchName = currentBranch?.name || 'Unknown';
+  const branchName = currentBranch ? getBranchDisplayName(currentBranch.id, 'Unknown') : 'Unknown';
   const branchStockList = inventory[currentBranchId] || [];
+
+  const savedRestockSources = useMemo(
+    () =>
+      suppliers
+        .filter((entity) => entity.type === 'SUPPLIER' || entity.type === 'CUSTOMER' || entity.type === 'BOTH')
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [suppliers]
+  );
+
+  React.useEffect(() => {
+    if (activeTab !== 'transfers') return;
+    const refreshTransferData = async () => {
+      try {
+        const [latestTransfers] = await Promise.all([
+          api.getTransfers(),
+          refreshShipments()
+        ]);
+        setTransfers(latestTransfers);
+      } catch (error) {
+        console.error('Failed to refresh transfer tab data:', error);
+      }
+    };
+    refreshTransferData();
+  }, [activeTab, setTransfers, refreshShipments]);
 
   const handleMsdSync = () => {
     setIsSyncingMSD(true);
     setTimeout(() => {
-        setProducts(prev => prev.map(p => {
+        setProducts((prev: Product[]) => prev.map(p => {
               if (Math.random() > 0.7) {
                   return { ...p, costPrice: Math.floor(p.costPrice * (1 + (Math.random() * 0.1 - 0.05))) };
               }
@@ -229,10 +409,10 @@ const Inventory: React.FC<InventoryProps> = ({
   // Export inventory to Excel
   const handleExportExcel = () => {
     try {
-      const exportData = filteredInventory.map(item => {
-        const product = products.find(p => p.id === item.productId);
+      const exportData = filteredInventory.map((item) => {
+        const product = products.find(p => p.id === item.id);
         return {
-          'Product ID': item.productId,
+          'Product ID': item.id,
           'Product Name': product?.name || 'Unknown',
           'Category': product?.category || 'General',
           'Quantity': item.quantity,
@@ -252,12 +432,12 @@ const Inventory: React.FC<InventoryProps> = ({
   };
 
   // Export inventory to PDF
-  const handleExportPDF = () => {
+  const handleExportPDF = async () => {
     try {
-      const exportData = filteredInventory.map(item => {
-        const product = products.find(p => p.id === item.productId);
+      const exportData = filteredInventory.map((item, index) => {
+        const product = products.find(p => p.id === item.id);
         return {
-          productId: item.productId,
+          productId: index + 1,
           name: product?.name || 'Unknown',
           category: product?.category || 'General',
           quantity: item.quantity,
@@ -274,13 +454,32 @@ const Inventory: React.FC<InventoryProps> = ({
       ];
 
       const totalValue = filteredInventory.reduce((sum, item) => {
-        const product = products.find(p => p.id === item.productId);
+        const product = products.find(p => p.id === item.id);
         return sum + (item.quantity * (product?.price || 0));
       }, 0);
 
-      exportToPDF(exportData, 'Inventory Report', columns, {
+      const settings = await api.getSettings().catch(() => []);
+      const getSetting = (key: string, fallback = '') =>
+        settings.find((s: any) => s.settingKey === key)?.settingValue || fallback;
+      const rawLogo = getSetting('logo', '/companyLogo.jpeg');
+      const logo = rawLogo.startsWith('http') || rawLogo.startsWith('data:')
+        ? rawLogo
+        : `${window.location.origin}${rawLogo.startsWith('/') ? '' : '/'}${rawLogo}`;
+
+      await exportToPDF(exportData, 'Inventory Report', columns, {
         totalItems: filteredInventory.length,
-        totalValue: totalValue
+        totalValue: totalValue,
+        subtitle: isHeadOffice ? 'Global Stock Overview' : `Branch: ${branchName}`,
+        printedFromBranch: branchName,
+        company: {
+          companyName: getSetting('companyName', 'Malenya Pharmaceuticals'),
+          address: getSetting('address', ''),
+          phone: getSetting('phone', ''),
+          email: getSetting('email', ''),
+          tinNumber: getSetting('tinNumber', ''),
+          vrnNumber: getSetting('vrnNumber', ''),
+          logo
+        }
       });
       showSuccess('Export Completed', 'Inventory report exported to PDF successfully.');
     } catch (error) {
@@ -289,147 +488,462 @@ const Inventory: React.FC<InventoryProps> = ({
     }
   };
 
+  const getAuthToken = () =>
+    localStorage.getItem('authToken') || sessionStorage.getItem('authToken') || '';
+
+  const handleOpenRestockInvoices = async () => {
+    setIsLoadingRestockInvoices(true);
+    setShowRestockInvoicesModal(true);
+    try {
+      const invoices = await api.getInvoices();
+      const filtered = (invoices || []).filter((inv) => String(inv.source || '').toUpperCase() === 'RESTOCK');
+      setRestockInvoices(filtered);
+    } catch (error) {
+      console.error('Failed to load restock invoices:', error);
+      showError('Load Failed', 'Unable to load restock invoices.');
+      setRestockInvoices([]);
+    } finally {
+      setIsLoadingRestockInvoices(false);
+    }
+  };
+
+  const handleViewRestockInvoice = async (invoiceId: string) => {
+    try {
+      const url = `${API_URL}finance/invoices/${encodeURIComponent(invoiceId)}/html`;
+      const token = getAuthToken();
+      const res = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      });
+      if (!res.ok) {
+        throw new Error(`Failed to open invoice (${res.status})`);
+      }
+      const html = await res.text();
+      const popup = window.open('', '_blank');
+      if (!popup) {
+        throw new Error('Popup blocked. Please allow popups and try again.');
+      }
+      const sanitizedHtml = html.replace(/Payment Terms & Conditions/gi, '');
+      popup.document.open();
+      popup.document.write(sanitizedHtml);
+      popup.document.close();
+      popup.addEventListener('load', () => {
+        try {
+          const doc = popup.document;
+          const toolbar = doc.createElement('div');
+          toolbar.style.position = 'sticky';
+          toolbar.style.top = '0';
+          toolbar.style.zIndex = '9999';
+          toolbar.style.display = 'flex';
+          toolbar.style.justifyContent = 'flex-end';
+          toolbar.style.gap = '8px';
+          toolbar.style.padding = '10px 16px';
+          toolbar.style.background = '#f8fafc';
+          toolbar.style.borderBottom = '1px solid #e2e8f0';
+          toolbar.style.fontFamily = 'Arial, sans-serif';
+
+          const printBtn = doc.createElement('button');
+          printBtn.textContent = 'Print';
+          printBtn.style.background = '#0f766e';
+          printBtn.style.color = '#fff';
+          printBtn.style.border = 'none';
+          printBtn.style.borderRadius = '6px';
+          printBtn.style.padding = '8px 14px';
+          printBtn.style.cursor = 'pointer';
+          printBtn.onclick = () => popup.print();
+
+          toolbar.appendChild(printBtn);
+          doc.body.insertBefore(toolbar, doc.body.firstChild);
+        } catch (e) {
+          console.error('Failed to attach print toolbar:', e);
+        }
+      });
+    } catch (error) {
+      console.error('Failed to view invoice:', error);
+      showError('View Failed', (error as Error)?.message || 'Unable to open invoice.');
+    }
+  };
+
+  const handleDownloadRestockInvoice = async (invoiceId: string) => {
+    try {
+      const url = `${API_URL}finance/invoices/${encodeURIComponent(invoiceId)}/pdf`;
+      const token = getAuthToken();
+      const res = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      });
+      if (!res.ok) {
+        throw new Error(`Failed to download invoice (${res.status})`);
+      }
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      const disposition = res.headers.get('content-disposition') || '';
+      const fileNameMatch = disposition.match(/filename=\"?([^\";]+)\"?/i);
+      const defaultExt = contentType.includes('pdf') ? 'pdf' : 'html';
+      const fallbackName = `${invoiceId}.${defaultExt}`;
+      const fileName = fileNameMatch?.[1] || fallbackName;
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(blobUrl);
+    } catch (error) {
+      console.error('Failed to download invoice:', error);
+      showError('Download Failed', (error as Error)?.message || 'Unable to download invoice.');
+    }
+  };
+
+  const handleShareRestockInvoice = async (invoiceId: string) => {
+    const url = `${API_URL}finance/invoices/${encodeURIComponent(invoiceId)}/html`;
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: `Restock Invoice ${invoiceId}`,
+          text: `Restock Invoice ${invoiceId}`,
+          url
+        });
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(`Restock Invoice ${invoiceId}: ${url}`);
+        showSuccess('Copied', 'Invoice share link copied to clipboard.');
+      } catch {
+        const textArea = document.createElement('textarea');
+        textArea.value = `Restock Invoice ${invoiceId}: ${url}`;
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+        showSuccess('Copied', 'Invoice share link copied to clipboard.');
+      }
+    } catch (error) {
+      console.error('Failed to share invoice:', error);
+      showError('Share Failed', 'Unable to share invoice.');
+    }
+  };
+
   const handleAddStock = async () => {
-     const qty = parseInt(newStock.quantity);
-     const isNew = addMode === 'NEW';
-     const productId = isNew ? `P-${Date.now()}` : newStock.productId;
-
-     // Input validation
-     if (!newStock.quantity || qty <= 0 || isNaN(qty)) {
-         showError("Invalid Quantity", "Please enter a valid quantity greater than 0.");
+     if (addMode === 'EXISTING') {
+       // Handle multiple items restock
+       if (restockExistingForm.items.length === 0) {
+         showError("No Items", "Please add at least one product to restock.");
          return;
-     }
+       }
 
-     if (!isNew && !newStock.productId) {
-         showError("Missing Product", "Please select a product to restock.");
+       const supplierName = restockExistingForm.isNewSupplier ? restockExistingForm.newSupplierName : restockExistingForm.supplierName;
+       let supplierId = restockExistingForm.supplierId;
+
+       if (restockExistingForm.isNewSupplier && !restockExistingForm.newSupplierName?.trim()) {
+         showError("Missing Supplier Name", "Please enter a supplier name.");
          return;
-     }
+       }
 
-     if (isNew) {
-         if (!newStock.name?.trim()) {
-             showError("Missing Name", "Please provide a product name.");
-             return;
+       try {
+         // Create new supplier if needed
+         if (restockExistingForm.isNewSupplier && restockExistingForm.newSupplierName?.trim()) {
+           try {
+             const newSupplier = await api.createEntity({
+               name: restockExistingForm.newSupplierName.trim(),
+               type: 'SUPPLIER',
+               creditLimit: 0,
+               currentBalance: 0,
+               discountPercentage: 0,
+               taxExempt: false,
+               status: 'ACTIVE'
+             });
+             supplierId = newSupplier.id;
+             // Add to saved source list without duplicates
+             setSuppliers(prev => {
+               if (prev.some(entity => entity.id === newSupplier.id)) return prev;
+               return [...prev, newSupplier];
+             });
+           } catch (error) {
+             console.error('Error creating supplier:', error);
+             showWarning("Supplier Not Saved", "The items will be added but the supplier was not saved for future use. You can create it manually in the Entities section.");
+           }
          }
-         if (!newStock.price || parseFloat(newStock.price) <= 0) {
-             showError("Invalid Price", "Please provide a valid selling price.");
-             return;
-         }
-         if (parseFloat(newStock.costPrice) < 0) {
-             showError("Invalid Cost", "Cost price cannot be negative.");
-             return;
-         }
-         const newProd: Product = {
-             id: productId,
-             name: newStock.name.trim(),
-             genericName: newStock.genericName?.trim() || '',
-             category: newStock.category,
-             costPrice: parseFloat(newStock.costPrice) || 0,
-             price: parseFloat(newStock.price) || 0,
-             unit: newStock.unit,
-             minStockLevel: newStock.minStock ? parseInt(newStock.minStock) : 0, // Default to 0 if not specified, so user can edit it
-             totalStock: 0,
-             requiresPrescription: false,
-             batches: []
-         };
 
-         try {
-             if (onAddProduct) {
-                 await onAddProduct(newProd);
-             } else {
-                 setProducts(prev => [...prev, newProd]);
+         const normalizedItems = restockExistingForm.items.map((item) => ({
+           ...item,
+           batchNumber: item.batchNumber || generateBatchNumber(),
+           expiryDate: item.expiryDate || ''
+         }));
+
+         // Submit all items together when bulk callback exists (single combined invoice on backend).
+         if (onAddStockBulk) {
+           await onAddStockBulk({
+             branchId: currentBranchId,
+             supplierId: supplierId || '',
+             supplierName: supplierName || '',
+             restockStatus: 'RECEIVED',
+             items: normalizedItems.map(item => ({
+               productId: item.productId,
+               batchNumber: item.batchNumber,
+               expiryDate: item.expiryDate,
+               quantity: item.quantity,
+               costPrice: item.costPrice,
+               sellingPrice: item.sellingPrice
+             }))
+           });
+         } else {
+           for (const item of normalizedItems) {
+             const payload = {
+               branchId: currentBranchId,
+               productId: item.productId,
+               batchNumber: item.batchNumber,
+               expiryDate: item.expiryDate,
+               quantity: item.quantity,
+               costPrice: item.costPrice,
+               sellingPrice: item.sellingPrice,
+               supplierId: supplierId || '',
+               supplierName: supplierName || ''
+             };
+             if (onAddStock) {
+               await onAddStock(payload);
              }
-         } catch (error) {
-             console.error('Error creating product:', error);
-             showError("Failed to Create Product", "There was an error creating the new product.");
-             return;
+           }
          }
-     }
 
-     // prepare batch data used for both local update and server
-     const batchNumber = newStock.batchNumber?.trim() || `BATCH-${Date.now()}`;
-     const expiryDate = newStock.expiryDate || '';
-     const payload = {
-         branchId: currentBranchId,
-         productId,
-         batchNumber,
-         expiryDate,
-         quantity: qty
-     };
+         for (const item of normalizedItems) {
+           setProducts(prev => prev.map(p =>
+             p.id === item.productId
+               ? { ...p, costPrice: item.costPrice, price: item.sellingPrice }
+               : p
+           ));
 
-     // helper to update local inventory (used on success or server-fallback)
-     const applyLocalInventoryUpdate = () => {
-         setInventory(prev => {
+           setInventory(prev => {
              const branchInventory = prev[currentBranchId] || [];
-             const existingItemIndex = branchInventory.findIndex(i => i.productId === productId);
+             const existingItemIndex = branchInventory.findIndex(i => i.productId === item.productId);
 
              const newBatch = {
-                 batchNumber,
-                 expiryDate,
-                 quantity: qty,
-                 status: 'ACTIVE' as BatchStatus
+               batchNumber: item.batchNumber,
+               expiryDate: item.expiryDate,
+               quantity: item.quantity,
+               status: 'ACTIVE' as BatchStatus
              };
 
              let updatedList = [...branchInventory];
              if (existingItemIndex >= 0) {
-                 updatedList[existingItemIndex] = {
-                     ...updatedList[existingItemIndex],
-                     batches: [...(updatedList[existingItemIndex].batches || []), newBatch],
-                     quantity: (updatedList[existingItemIndex].quantity || 0) + qty
-                 };
+               updatedList[existingItemIndex] = {
+                 ...updatedList[existingItemIndex],
+                 batches: [...(updatedList[existingItemIndex].batches || []), newBatch],
+                 quantity: (updatedList[existingItemIndex].quantity || 0) + item.quantity
+               };
              } else {
-                 updatedList.push({
-                     productId,
-                     quantity: qty,
-                     batches: [newBatch]
-                 });
+               updatedList.push({
+                 productId: item.productId,
+                 quantity: item.quantity,
+                 batches: [newBatch]
+               });
              }
              return { ...prev, [currentBranchId]: updatedList };
-         });
-     };
-
-     try {
-         if (onAddStock) {
-             // call user-provided API handler and allow it to throw on non-2xx
-             await onAddStock(payload);
+           });
          }
 
-         // always apply local update so UI reflects change immediately
-         applyLocalInventoryUpdate();
+         const results = normalizedItems.map(item => ({ productId: item.productId, quantity: item.quantity }));
 
-         const prodName = isNew ? newStock.name : products.find(p => p.id === productId)?.name || 'Product';
-         showSuccess("Stock Added Successfully", `${qty} units of ${prodName} added to inventory.`);
+         const itemSummary = results.map(r => {
+           const product = products.find(p => p.id === r.productId);
+           return `${r.quantity} units of ${product?.name || 'Product'}`;
+         }).join(', ');
+
+         showSuccess(
+           "Stock Added Successfully",
+           `Added: ${itemSummary}${supplierName ? ` from ${supplierName}` : ''}`
+         );
 
          // Reset form
          setNewStock({
-            productId: '', name: '', genericName: '', category: 'General',
-            costPrice: '', price: '', unit: 'Box', minStock: '10',
-            batchNumber: '', expiryDate: '', quantity: ''
+           productId: '', name: '', genericName: '', category: 'General',
+           costPrice: '', price: '', unit: 'Box', minStock: '10',
+           batchNumber: '', expiryDate: '', quantity: ''
+         });
+         setRestockExistingForm({
+           items: [],
+           supplierId: '',
+           supplierName: '',
+           isNewSupplier: false,
+           newSupplierName: ''
+         });
+         setCurrentRestockItem({
+           productId: '',
+           quantity: 0,
+           batchNumber: '',
+           expiryDate: '',
+           costPrice: 0,
+           sellingPrice: 0
          });
          setAddMode('EXISTING');
          setShowAddModal(false);
-     } catch (error) {
+       } catch (error) {
          console.error('Error adding stock (server):', error);
-
-         // detect common HTTP 404 from fetch/XHR wrappers (may vary by implementation)
          const status = (error as any)?.status || (error as any)?.response?.status || null;
          if (status === 404) {
-             showError("API Route Not Found", "POST /inventory/addStock returned 404. Check backend route or base URL.");
+           showError("API Route Not Found", "POST /inventory/addStock returned 404. Check backend route or base URL.");
          } else {
-             showError("Failed to Add Stock", `Server error: ${(error as Error).message || 'Unknown error'}`);
+           showError("Failed to Add Stock", `Server error: ${(error as Error).message || 'Unknown error'}`);
          }
-
-         // fallback: apply local update so restock still works in UI
-         applyLocalInventoryUpdate();
-         showWarning("Local Update Applied", "Inventory updated locally — server was not updated.");
+         showWarning("Partial Update", "Some items may have been updated locally even though the server returned an error.");
          
-         // reset form and keep modal closed (consistent with success flow)
          setNewStock({
-            productId: '', name: '', genericName: '', category: 'General',
-            costPrice: '', price: '', unit: 'Box', minStock: '10',
-            batchNumber: '', expiryDate: '', quantity: ''
+           productId: '', name: '', genericName: '', category: 'General',
+           costPrice: '', price: '', unit: 'Box', minStock: '10',
+           batchNumber: '', expiryDate: '', quantity: ''
+         });
+         setRestockExistingForm({
+           items: [],
+           supplierId: '',
+           supplierName: '',
+           isNewSupplier: false,
+           newSupplierName: ''
          });
          setAddMode('EXISTING');
          setShowAddModal(false);
+       }
+     } else {
+       // Handle new product creation (existing logic)
+       const qty = parseInt(newStock.quantity);
+       const isNew = addMode === 'NEW';
+       const productId = isNew ? `P-${Date.now()}` : newStock.productId;
+
+       // Input validation
+       if (!newStock.quantity || qty <= 0 || isNaN(qty)) {
+           showError("Invalid Quantity", "Please enter a valid quantity greater than 0.");
+           return;
+       }
+
+       if (!isNew && !newStock.productId) {
+           showError("Missing Product", "Please select a product to restock.");
+           return;
+       }
+
+       if (isNew) {
+           if (!newStock.name?.trim()) {
+               showError("Missing Name", "Please provide a product name.");
+               return;
+           }
+           if (!newStock.price || parseFloat(newStock.price) <= 0) {
+               showError("Invalid Price", "Please provide a valid selling price.");
+               return;
+           }
+           if (parseFloat(newStock.costPrice) < 0) {
+               showError("Invalid Cost", "Cost price cannot be negative.");
+               return;
+           }
+           const newProd: Product = {
+               id: productId,
+               name: newStock.name.trim(),
+               genericName: newStock.genericName?.trim() || '',
+               category: newStock.category,
+               costPrice: parseFloat(newStock.costPrice) || 0,
+               price: parseFloat(newStock.price) || 0,
+               unit: newStock.unit,
+               minStockLevel: newStock.minStock ? parseInt(newStock.minStock) : 0,
+               totalStock: 0,
+               requiresPrescription: false,
+               batches: []
+           };
+
+           try {
+               if (onAddProduct) {
+                   await onAddProduct(newProd);
+               } else {
+                   setProducts((prev: Product[]) => [...prev, newProd]);
+               }
+           } catch (error) {
+               console.error('Error creating product:', error);
+               showError("Failed to Create Product", "There was an error creating the new product.");
+               return;
+           }
+       }
+
+       // prepare batch data used for both local update and server
+       const batchNumber = newStock.batchNumber?.trim() || generateBatchNumber();
+       const expiryDate = newStock.expiryDate || '';
+       const payload = {
+           branchId: currentBranchId,
+           productId,
+           batchNumber,
+           expiryDate,
+           quantity: qty
+       };
+
+       // helper to update local inventory (used on success or server-fallback)
+       const applyLocalInventoryUpdate = () => {
+           setInventory(prev => {
+               const branchInventory = prev[currentBranchId] || [];
+               const existingItemIndex = branchInventory.findIndex(i => i.productId === productId);
+
+               const newBatch = {
+                   batchNumber,
+                   expiryDate,
+                   quantity: qty,
+                   status: 'ACTIVE' as BatchStatus
+               };
+
+               let updatedList = [...branchInventory];
+               if (existingItemIndex >= 0) {
+                   updatedList[existingItemIndex] = {
+                       ...updatedList[existingItemIndex],
+                       batches: [...(updatedList[existingItemIndex].batches || []), newBatch],
+                       quantity: (updatedList[existingItemIndex].quantity || 0) + qty
+                   };
+               } else {
+                   updatedList.push({
+                       productId,
+                       quantity: qty,
+                       batches: [newBatch]
+                   });
+               }
+               return { ...prev, [currentBranchId]: updatedList };
+           });
+       };
+
+       try {
+           if (onAddStock) {
+               // call user-provided API handler and allow it to throw on non-2xx
+               await onAddStock(payload);
+           }
+
+           // always apply local update so UI reflects change immediately
+           applyLocalInventoryUpdate();
+
+           const prodName = isNew ? newStock.name : products.find(p => p.id === productId)?.name || 'Product';
+           showSuccess("Stock Added Successfully", `${qty} units of ${prodName} added to inventory.`);
+
+           // Reset form
+           setNewStock({
+              productId: '', name: '', genericName: '', category: 'General',
+              costPrice: '', price: '', unit: 'Box', minStock: '10',
+              batchNumber: '', expiryDate: '', quantity: ''
+           });
+           setAddMode('EXISTING');
+           setShowAddModal(false);
+       } catch (error) {
+           console.error('Error adding stock (server):', error);
+
+           // detect common HTTP 404 from fetch/XHR wrappers (may vary by implementation)
+           const status = (error as any)?.status || (error as any)?.response?.status || null;
+           if (status === 404) {
+               showError("API Route Not Found", "POST /inventory/addStock returned 404. Check backend route or base URL.");
+           } else {
+               showError("Failed to Add Stock", `Server error: ${(error as Error).message || 'Unknown error'}`);
+           }
+
+           // fallback: apply local update so restock still works in UI
+           applyLocalInventoryUpdate();
+           showWarning("Local Update Applied", "Inventory updated locally — server was not updated.");
+           
+           // reset form and keep modal closed (consistent with success flow)
+           setNewStock({
+              productId: '', name: '', genericName: '', category: 'General',
+              costPrice: '', price: '', unit: 'Box', minStock: '10',
+              batchNumber: '', expiryDate: '', quantity: ''
+           });
+           setAddMode('EXISTING');
+           setShowAddModal(false);
+       }
      }
   };
 
@@ -450,23 +964,53 @@ const Inventory: React.FC<InventoryProps> = ({
            return;
        }
 
-       const newTransfer: StockTransfer = {
-           id: `TR-${Date.now().toString().slice(-6)}`,
-           sourceBranchId: currentBranchId,
-           targetBranchId: newShipment.targetBranchId,
-           dateSent: new Date().toISOString().split('T')[0],
-           items: newShipment.items,
-           status: 'IN_TRANSIT',
-           notes: newShipment.notes?.trim() || ''
-       };
-
        try {
-           if (onCreateTransfer) {
-               await onCreateTransfer(newTransfer);
-           } else {
-               setTransfers([newTransfer, ...transfers]);
-           }
-           setCreatedTransfer(newTransfer);
+           const shipmentItems = newShipment.items.map(item => {
+               const product = products.find(p => p.id === item.productId);
+               return {
+                   productId: item.productId,
+                   productName: item.productName || product?.name || '',
+                   quantity: Number(item.quantity) || 0,
+                   batchNumber: item.batchNumber || '',
+                   expiryDate: item.expiryDate || '',
+                   price: Number(item.price) || Number(product?.price) || 0
+               };
+           });
+
+           const totalValue = shipmentItems.reduce((sum, item) => sum + (item.quantity * item.price), 0);
+
+           const response = await api.createDirectShipment({
+               fromBranchId: currentBranchId,
+               toBranchId: newShipment.targetBranchId,
+               status: 'PENDING',
+               notes: newShipment.notes?.trim() || '',
+               items: shipmentItems,
+               totalValue
+           });
+
+           // Refresh transfers and shipments from backend so lists stay in sync.
+           const [updatedTransfers, refreshedShipments] = await Promise.all([
+             api.getTransfers(),
+             api.getShipments()
+           ]);
+           setTransfers(updatedTransfers);
+           setShipments(refreshedShipments);
+
+           const transferSummary: StockTransfer = {
+               id: response?.shipment?.transferId || '',
+               sourceBranchId: currentBranchId,
+               targetBranchId: newShipment.targetBranchId,
+               dateSent: new Date().toISOString().split('T')[0],
+               items: newShipment.items,
+               status: 'IN_TRANSIT',
+               notes: newShipment.notes?.trim() || ''
+           };
+
+           setCreatedTransfer(transferSummary);
+           setCreatedShipmentMeta({
+               shipmentId: response?.shipment?.id,
+               invoiceId: response?.invoice?.id
+           });
            setShowTransferModal(false);
            setShowTransferSuccessModal(true);
            // Reset form
@@ -477,9 +1021,14 @@ const Inventory: React.FC<InventoryProps> = ({
            });
        } catch (error) {
            console.error('Failed to create transfer:', error);
-           showError("Failed to Create Shipment", "There was an error saving the shipment data. Please try again.");
+           let errorMessage = "There was an error saving the shipment data. Please try again.";
+           if (error instanceof Error && error.message) {
+               const match = error.message.match(/failed:\s*(.*)$/i);
+               errorMessage = (match?.[1] || error.message).trim();
+           }
+           showError("Failed to Create Shipment", errorMessage);
        }
-   };
+  };
 
   const addItemToRequisition = () => {
       if (!currentItem.productId || !currentItem.quantity) {
@@ -536,11 +1085,17 @@ const Inventory: React.FC<InventoryProps> = ({
       // Determine priority based on items
       const hasUrgentItems = requisitionItems.some(item => item.currentStock === 0);
       const priority = hasUrgentItems ? 'URGENT' : 'NORMAL';
+      const headOfficeBranch = branches.find((b) => b.isHeadOffice);
+      const headOfficeBranchId = headOfficeBranch?.id || 'HEAD_OFFICE';
+      const headOfficeName = headOfficeBranch
+        ? getBranchDisplayName(headOfficeBranch.id, headOfficeBranch.name)
+        : 'Head Office 👑';
 
       // Create requisition payload - store requesting branch
       const requisitionData = {
         id: `REQ-${Date.now()}`,
         branchId: currentBranchId,
+        targetBranchId: headOfficeBranchId,
         requestedBy: currentUser?.id || 'Unknown',
         items: requisitionItems.map(item => ({
           productId: item.productId,
@@ -553,7 +1108,7 @@ const Inventory: React.FC<InventoryProps> = ({
 
       try {
           // Send to backend
-          await api.request('/requisitions', {
+          const requisitionResponse = await api.request('/requisitions', {
               method: 'POST',
               body: JSON.stringify(requisitionData)
           });
@@ -562,106 +1117,155 @@ const Inventory: React.FC<InventoryProps> = ({
           const totalValue = requisitionItems.reduce((sum, item) => sum + (item.quantityRequested * item.unitPrice), 0);
 
           showSuccess("Stock Requisition Submitted",
-              `Requisition with ${requisitionItems.length} items (${totalItems} units total, estimated value: ${fmtCurrency(totalValue)} TZS) has been sent to Head Office for approval.`,
+              `Requisition with ${requisitionItems.length} items (${totalItems} units total, estimated value: ${fmtCurrency(totalValue)} TZS) has been sent to ${headOfficeName} for approval.`,
               8000
           );
+          if (requisitionResponse?.invoiceId) {
+              showInfo('Requisition Invoice', `Invoice ${requisitionResponse.invoiceId} created automatically.`);
+          }
 
           setShowRequestModal(false);
           setRequisitionItems([]);
           setCurrentItem({ productId: '', quantity: '' });
+          setIsLoadingRequestHistory(true);
+          await refreshRequisitions();
       } catch (error) {
           console.error('Failed to submit requisition:', error);
           showError("Submission Failed", "There was an error submitting your requisition. Please try again.");
       }
   };
 
-  const handleVerifyTransfer = () => {
-      if (!activeTransferId) return;
+  const handleVerifyTransfer = async () => {
+      if ((verifyStep === 'KEEPER' && !canKeeperVerify) || (verifyStep === 'CONTROLLER' && !canControllerVerify)) {
+          setVerifyError('You are not allowed to verify this shipment.');
+          showError('Access Denied', 'You are not allowed to verify this shipment.');
+          return;
+      }
+      if (!activeTransferId) {
+          setVerifyError('Missing transfer ID.');
+          showError('Verification Failed', 'Missing transfer ID.');
+          return;
+      }
+      if (!activeTransferForVerification) {
+          setVerifyError('Unable to load shipment contents for this transfer.');
+          showError('Verification Failed', 'Unable to load shipment contents for this transfer. Please refresh and try again.');
+          return;
+      }
+      if (!hasReviewedShipmentContents) {
+          setVerifyError('Please review shipment contents before verifying.');
+          showError('Review Required', 'Please review shipment contents before verifying.');
+          return;
+      }
 
-      const transfer = transfers.find(t => t.id === activeTransferId);
-      if (!transfer) return;
+      try {
+          let verifiedTransfer: StockTransfer | null = null;
+          if (verifyStep === 'KEEPER') {
+              verifiedTransfer = await api.verifyTransferByStoreKeeper(activeTransferId);
+          } else if (verifyStep === 'CONTROLLER') {
+              verifiedTransfer = await api.verifyTransferByController(activeTransferId);
+          }
 
-      if (verifyStep === 'KEEPER') {
-          // Add stock to inventory with ON_HOLD status after keeper verification
-          setInventory(prev => {
-              const branchStock = [...(prev[currentBranchId] || [])];
-              transfer.items.forEach(item => {
-                  const idx = branchStock.findIndex(p => p.productId === item.productId);
-                  const newBatch = {
-                      batchNumber: item.batchNumber,
-                      expiryDate: item.expiryDate,
-                      quantity: item.quantity,
-                      status: 'ON_HOLD' as BatchStatus // Hold until controller verifies
+          const [updatedTransfers, refreshedInventory, refreshedShipments] = await Promise.all([
+              api.getTransfers(),
+              api.getInventory(currentBranchId),
+              api.getShipments()
+          ]);
+
+          setTransfers(prev => {
+              const base = updatedTransfers.length > 0 ? updatedTransfers : prev;
+              if (!verifiedTransfer?.id) return base;
+              const idx = base.findIndex(t => t.id === verifiedTransfer!.id);
+              if (idx >= 0) {
+                  const next = [...base];
+                  next[idx] = { ...next[idx], ...verifiedTransfer };
+                  return next;
+              }
+              return [verifiedTransfer, ...base];
+          });
+          setInventory(prev => ({ ...prev, ...refreshedInventory }));
+          setShipments(prev => {
+              const base = refreshedShipments.length > 0 ? refreshedShipments : prev;
+              if (!verifiedTransfer?.id) return base;
+              return base.map(shipment => {
+                  const sameTransfer = normalizeIdKey(shipment.transferId || shipment.id) === normalizeIdKey(verifiedTransfer!.id);
+                  if (!sameTransfer) return shipment;
+                  return {
+                      ...shipment,
+                      // Keep shipment status model valid while transfer drives workflow step.
+                      status: verifiedTransfer!.status === 'COMPLETED' ? 'DELIVERED' : shipment.status,
+                      items: (shipment.items && shipment.items.length > 0)
+                        ? shipment.items
+                        : (verifiedTransfer!.items || []).map(item => ({
+                            productId: item.productId,
+                            productName: item.productName || products.find(p => p.id === item.productId)?.name || 'Unknown Product',
+                            quantity: Number(item.quantity || 0)
+                          }))
                   };
-
-                  if (idx >= 0) {
-                      branchStock[idx].batches.push(newBatch);
-                      branchStock[idx].quantity += item.quantity;
-                  } else {
-                      branchStock.push({
-                          productId: item.productId,
-                          quantity: item.quantity,
-                          batches: [newBatch]
-                      });
-                  }
               });
-              return { ...prev, [currentBranchId]: branchStock };
           });
 
-          const updated: StockTransfer = {
-              ...transfer,
-              status: 'RECEIVED_KEEPER',
-              verifiedBy: {
-                  ...transfer.verifiedBy,
-                  storeKeeper: {
-                      userId: currentUser?.id || 'unknown',
-                      userName: currentUser?.username || 'Store Keeper',
-                      timestamp: new Date().toISOString()
-                  }
-              }
-          };
-          setTransfers(transfers.map(t => t.id === activeTransferId ? updated : t));
           setVerifyError('');
           setShowVerifyModal(false);
-          showSuccess("Keeper Verification Successful", "Shipment confirmed. Awaiting controller verification.");
-      } else if (verifyStep === 'CONTROLLER') {
-           // Update batch status to ACTIVE after controller verification
-           setInventory(prev => {
-              const branchStock = [...(prev[currentBranchId] || [])];
-              transfer.items.forEach(item => {
-                  const productIdx = branchStock.findIndex(p => p.productId === item.productId);
-                  if (productIdx >= 0) {
-                      // Find the most recent batch for this transfer and make it ACTIVE
-                      const recentBatch = branchStock[productIdx].batches
-                          .filter(b => b.batchNumber === item.batchNumber)
-                          .pop(); // Get the last one added
-                      if (recentBatch) {
-                          recentBatch.status = 'ACTIVE';
-                      }
-                  }
-              });
-              return { ...prev, [currentBranchId]: branchStock };
-           });
+          setHasReviewedShipmentContents(false);
 
-           const updated: StockTransfer = {
-               ...transfer,
-               status: 'COMPLETED',
-               verifiedBy: {
-                   ...transfer.verifiedBy,
-                   inventoryController: {
-                       userId: currentUser?.id || 'unknown',
-                       userName: currentUser?.username || 'Inventory Controller',
-                       timestamp: new Date().toISOString()
-                   }
-               }
-           };
-           setTransfers(transfers.map(t => t.id === activeTransferId ? updated : t));
-
-           setVerifyError('');
-           setShowVerifyModal(false);
-           showSuccess("Controller Verification Complete", "Stock has been verified and is now available for sale in POS.");
-       }
+          if (verifyStep === 'KEEPER') {
+              showSuccess("Keeper Verification Successful", "Shipment confirmed. Awaiting controller verification.");
+          } else {
+              showSuccess("Controller Verification Complete", "Stock has been fully verified.");
+          }
+      } catch (error) {
+          console.error('Transfer verification failed:', error);
+          const message = error instanceof Error ? error.message : 'Failed to verify transfer.';
+          setVerifyError(message);
+          showError('Verification Failed', message);
+      }
    };
+
+  const openRejectTransferModal = (transferId: string, step: 'KEEPER' | 'CONTROLLER') => {
+      setRejectTransferId(transferId.trim());
+      setRejectStep(step);
+      setRejectReason('');
+      setShowRejectModal(true);
+  };
+
+  const handleRejectTransfer = async () => {
+      if ((rejectStep === 'KEEPER' && !canKeeperVerify) || (rejectStep === 'CONTROLLER' && !canControllerVerify)) {
+          showError('Access Denied', 'You are not allowed to reject this shipment.');
+          return;
+      }
+      if (!rejectTransferId) {
+          showError('Rejection Failed', 'Missing transfer ID.');
+          return;
+      }
+      setIsRejectingTransfer(true);
+      try {
+          const rejectedTransfer = await api.rejectTransfer(rejectTransferId, { step: rejectStep, reason: rejectReason.trim() });
+          const [updatedTransfers, refreshedShipments] = await Promise.all([
+              api.getTransfers(),
+              api.getShipments()
+          ]);
+
+          setTransfers(prev => {
+              const base = updatedTransfers.length > 0 ? updatedTransfers : prev;
+              if (!rejectedTransfer?.id) return base;
+              return base.map(t => normalizeIdKey(t.id) === normalizeIdKey(rejectedTransfer.id) ? { ...t, ...rejectedTransfer } : t);
+          });
+          if (refreshedShipments.length > 0) {
+              setShipments(refreshedShipments);
+          }
+
+          setShowRejectModal(false);
+          setRejectTransferId(null);
+          setRejectReason('');
+          showWarning('Shipment Rejected', `Transfer ${rejectTransferId} has been rejected.`);
+      } catch (error) {
+          console.error('Failed to reject transfer:', error);
+          const message = error instanceof Error ? error.message : 'Failed to reject transfer.';
+          showError('Rejection Failed', message);
+      } finally {
+          setIsRejectingTransfer(false);
+      }
+  };
 
   const parseCSV = (csvText: string): any[] => {
       const lines = csvText.split('\n').filter(line => line.trim());
@@ -875,10 +1479,174 @@ const Inventory: React.FC<InventoryProps> = ({
      });
    }, [products, branchStockList, inventory, currentBranchId]);
 
-   const incomingTransfers = transfers.filter(t => t.targetBranchId === currentBranchId);
-   const outgoingTransfers = transfers.filter(t => t.sourceBranchId === currentBranchId);
-   const totalAssetValue = mergedInventory.reduce((acc, i) => acc + (i.assetValue || 0), 0);
-   const totalRetailValue = mergedInventory.reduce((acc, i) => acc + (i.retailValue || 0), 0);
+   const normalizedUserRole = String(currentUser?.role || '').toUpperCase().replace(/\s+/g, '_');
+   const isSuperAdmin = normalizedUserRole === UserRole.SUPER_ADMIN;
+   const isBranchManager = normalizedUserRole === UserRole.BRANCH_MANAGER;
+   const isStoreKeeperRole = normalizedUserRole === UserRole.STOREKEEPER || normalizedUserRole === 'STORE_KEEPER';
+   const isInventoryControllerRole = normalizedUserRole === UserRole.INVENTORY_CONTROLLER;
+   const effectiveBranchId = String(isSuperAdmin ? currentBranchId : (currentUser?.branchId || currentBranchId));
+   const canKeeperVerify = isStoreKeeperRole;
+   const canControllerVerify = isInventoryControllerRole;
+   const incomingTransfers = isSuperAdmin
+     ? transfers
+     : transfers.filter(t => branchIdsMatch(t.targetBranchId, effectiveBranchId));
+   const incomingTransferWorkflowStatus = React.useCallback((transfer: StockTransfer) => {
+     const transferStatus = normalizeTransferStatus(transfer.status);
+     const keeperVerified = Boolean(transfer.verifiedBy?.storeKeeper);
+     const controllerVerified = Boolean(transfer.verifiedBy?.inventoryController);
+     return controllerVerified || transferStatus === 'COMPLETED'
+       ? 'COMPLETED'
+       : keeperVerified
+         ? 'RECEIVED_KEEPER'
+         : transferStatus;
+   }, []);
+   const activeIncomingTransfers = useMemo(
+     () => incomingTransfers.filter((transfer) => incomingTransferWorkflowStatus(transfer) !== 'COMPLETED'),
+     [incomingTransfers, incomingTransferWorkflowStatus]
+   );
+   const newUnverifiedIncomingTransfers = useMemo(
+     () => incomingTransfers.filter((transfer) => {
+       const transferStatus = normalizeTransferStatus(transfer.status);
+       const keeperVerified = Boolean(transfer.verifiedBy?.storeKeeper);
+       const controllerVerified = Boolean(transfer.verifiedBy?.inventoryController);
+       return transferStatus !== 'COMPLETED' && transferStatus !== 'REJECTED' && (!keeperVerified || !controllerVerified);
+     }),
+     [incomingTransfers]
+   );
+   const shouldShowNewTransferIndicator =
+     (isStoreKeeperRole || isInventoryControllerRole) && newUnverifiedIncomingTransfers.length > 0;
+   const completedIncomingTransfers = useMemo(
+     () => incomingTransfers.filter((transfer) => incomingTransferWorkflowStatus(transfer) === 'COMPLETED'),
+     [incomingTransfers, incomingTransferWorkflowStatus]
+   );
+   const outgoingTransfers = isSuperAdmin
+     ? []
+     : transfers.filter(t => branchIdsMatch(t.sourceBranchId, effectiveBranchId));
+   const managedShipmentsBase = useMemo(() => {
+	     return shipments
+	       .filter(s => {
+	         const isIncoming = branchIdsMatch(s.toBranchId, effectiveBranchId);
+	         const isOutgoing = branchIdsMatch(s.fromBranchId, effectiveBranchId);
+	         return isIncoming || isOutgoing || isSuperAdmin;
+	       })
+	       .map(s => {
+	         const isIncoming = branchIdsMatch(s.toBranchId, effectiveBranchId);
+	         const isOutgoing = branchIdsMatch(s.fromBranchId, effectiveBranchId);
+	         const direction = isIncoming ? 'INCOMING' : isOutgoing ? 'OUTGOING' : 'NETWORK';
+	         const normalizedStatus = normalizeShipmentStatus(s.status);
+	         const relatedTransfer = transfers.find(t => normalizeIdKey(t.id) === normalizeIdKey(s.transferId || s.id)) || null;
+	         const shipmentItems = Array.isArray(s.items) ? s.items : [];
+	         const fallbackTransferItems = Array.isArray(relatedTransfer?.items)
+	           ? relatedTransfer.items.map((item: any) => ({
+	               productId: item?.productId || '',
+	               productName:
+	                 item?.productName
+	                 || products.find(p => p.id === item?.productId)?.name
+	                 || 'Unknown Product',
+	               quantity: Number(item?.quantity || 0)
+	             }))
+	           : [];
+	         const items = shipmentItems.length > 0 ? shipmentItems : fallbackTransferItems;
+	         const totalQuantity = items.reduce((sum, item) => sum + (item?.quantity || 0), 0);
+	         const fromBranchName = getBranchDisplayName(s.fromBranchId);
+	         const toBranchName = getBranchDisplayName(s.toBranchId);
+         const createdAtTs = s.createdAt ? new Date(s.createdAt).getTime() : 0;
+         return {
+           shipment: s,
+           items,
+           totalQuantity,
+           normalizedStatus,
+           direction,
+           fromBranchName,
+           toBranchName,
+           createdAtTs,
+           relatedTransfer
+         };
+       });
+	   }, [shipments, effectiveBranchId, isSuperAdmin, branches, transfers, products]);
+   const managedShipments = useMemo(() => {
+     const query = shipmentSearchQuery.trim().toLowerCase();
+     const filtered = managedShipmentsBase.filter(entry => {
+       const matchesStatus = shipmentStatusFilter === 'ALL' || entry.normalizedStatus === shipmentStatusFilter;
+       const matchesDirection = shipmentDirectionFilter === 'ALL' || entry.direction === shipmentDirectionFilter;
+       const matchesQuery = !query
+         || entry.shipment.id.toLowerCase().includes(query)
+         || (entry.shipment.notes || '').toLowerCase().includes(query)
+         || entry.fromBranchName.toLowerCase().includes(query)
+         || entry.toBranchName.toLowerCase().includes(query)
+         || entry.items.some(item => (item?.productName || '').toLowerCase().includes(query));
+       return matchesStatus && matchesDirection && matchesQuery;
+     });
+
+     filtered.sort((a, b) => {
+       if (shipmentSortBy === 'NEWEST') {
+         const recentCutoff = Date.now() - (3 * 24 * 60 * 60 * 1000);
+         const isAttentionNeeded = (entry: typeof filtered[number]) => {
+           const transfer = entry.relatedTransfer;
+           const transferStatus = normalizeTransferStatus(transfer?.status || entry.shipment.status);
+           const keeperVerified = Boolean(transfer?.verifiedBy?.storeKeeper);
+           const controllerVerified = Boolean(transfer?.verifiedBy?.inventoryController);
+           return (
+             transferStatus === 'IN_TRANSIT'
+             || transferStatus === 'RECEIVED_KEEPER'
+             || !keeperVerified
+             || !controllerVerified
+           );
+         };
+         const getPriorityBucket = (entry: typeof filtered[number]) => {
+           if (entry.createdAtTs >= recentCutoff) return 0;
+           if (isAttentionNeeded(entry)) return 1;
+           return 2;
+         };
+         const aBucket = getPriorityBucket(a);
+         const bBucket = getPriorityBucket(b);
+         if (aBucket !== bBucket) return aBucket - bBucket;
+         return b.createdAtTs - a.createdAtTs;
+       }
+       if (shipmentSortBy === 'OLDEST') return a.createdAtTs - b.createdAtTs;
+       if (shipmentSortBy === 'VALUE_HIGH') return (b.shipment.totalValue || 0) - (a.shipment.totalValue || 0);
+       if (shipmentSortBy === 'VALUE_LOW') return (a.shipment.totalValue || 0) - (b.shipment.totalValue || 0);
+       if (shipmentSortBy === 'ITEMS_HIGH') return b.totalQuantity - a.totalQuantity;
+       if (shipmentSortBy === 'ITEMS_LOW') return a.totalQuantity - b.totalQuantity;
+       return b.createdAtTs - a.createdAtTs;
+     });
+
+     return filtered;
+   }, [managedShipmentsBase, shipmentSearchQuery, shipmentStatusFilter, shipmentDirectionFilter, shipmentSortBy]);
+   const transfersById = useMemo(() => {
+     const map = new Map<string, StockTransfer>();
+     transfers.forEach((transfer) => {
+       map.set(normalizeIdKey(transfer.id), transfer);
+     });
+     return map;
+   }, [transfers]);
+  const managedShipmentSummary = useMemo(() => {
+     return managedShipments.reduce(
+       (acc, entry) => {
+         acc.total += 1;
+         acc.totalValue += entry.shipment.totalValue || 0;
+         if (entry.normalizedStatus === 'PENDING') acc.pending += 1;
+         if (entry.normalizedStatus === 'APPROVED') acc.approved += 1;
+         if (entry.normalizedStatus === 'IN_TRANSIT') acc.inTransit += 1;
+         if (entry.normalizedStatus === 'DELIVERED') acc.delivered += 1;
+         if (entry.normalizedStatus === 'REJECTED') acc.rejected += 1;
+         return acc;
+       },
+       { total: 0, pending: 0, approved: 0, inTransit: 0, delivered: 0, rejected: 0, totalValue: 0 }
+     );
+  }, [managedShipments]);
+  const activeTransferForVerification = useMemo(() => {
+    if (!activeTransferId) return null;
+    return transfers.find(t => normalizeIdKey(t.id) === normalizeIdKey(activeTransferId)) || null;
+  }, [activeTransferId, transfers]);
+  const totalAssetValue = mergedInventory.reduce((acc, i) => acc + (i.assetValue || 0), 0);
+  const totalRetailValue = mergedInventory.reduce((acc, i) => acc + (i.retailValue || 0), 0);
+  const openVerifyModal = (transferId: string, step: 'KEEPER' | 'CONTROLLER') => {
+    setActiveTransferId(transferId.trim());
+    setVerifyStep(step);
+    setHasReviewedShipmentContents(false);
+    setShowVerifyModal(true);
+  };
 
    // Filtered inventory based on search and filters
    const filteredInventory = useMemo(() => {
@@ -904,50 +1672,37 @@ const Inventory: React.FC<InventoryProps> = ({
    }, [mergedInventory, searchQuery, categoryFilter, stockFilter]);
 
    return (
-     <div className="space-y-6">
-       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-         <div>
-           <h2 className="text-3xl font-bold text-slate-900">Inventory Management</h2>
-           <p className="text-slate-500 mt-1">
-              {isHeadOffice ? 'Global Stock Overview' : `Managing stock for ${branchName}`}
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-2xl md:text-3xl font-bold text-slate-900">Inventory Management</h2>
+          <p className="text-sm md:text-base text-slate-500 mt-1">
+             {isHeadOffice ? 'Global Stock Overview' : `Managing stock for ${branchName}`}
            </p>
          </div>
-         <div className="flex gap-2 flex-wrap">
+         <div className="flex gap-2 flex-wrap w-full md:w-auto">
              {isHeadOffice ? (
                  <>
                  <button
                    onClick={() => setShowAddModal(true)}
-                   className="flex items-center gap-2 px-5 py-3 bg-teal-600 text-white rounded-xl hover:bg-teal-700 font-bold shadow-lg"
+                   className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-teal-600 text-white text-sm rounded-xl hover:bg-teal-700 font-semibold shadow-lg"
                  >
-                   <Plus size={20} /> Add New Product
+                   <Plus size={18} /> Add New Product
                  </button>
-                  <button
-                    onClick={handleExportPDF}
-                    className="flex items-center gap-2 px-5 py-3 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 font-bold shadow-lg"
-                    title="Export to PDF"
-                  >
-                    <FileText size={20} /> Export PDF
-                  </button>
-                  <button
-                    onClick={handleExportExcel}
-                    className="flex items-center gap-2 px-5 py-3 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 font-bold shadow-lg"
-                    title="Export to Excel"
-                  >
-                    <BarChart3 size={20} /> Export Excel
-                  </button>
-                 <div className="relative">
+                 <div className="relative w-full sm:w-auto">
                    <button
                      onClick={() => setShowTransferModal(true)}
-                     className="flex items-center gap-2 px-5 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 font-bold shadow-lg relative"
+                     className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white text-sm rounded-xl hover:bg-blue-700 font-semibold shadow-lg relative"
                      title="Create new shipment (Ctrl+Shift+S)"
                    >
-                     <Truck size={20} />
+                     <Truck size={18} />
                      New Shipment
-                     {incomingTransfers.filter(t => t.status !== 'COMPLETED').length > 0 && (
-                       <span className="absolute -top-2 -right-2 bg-red-500 text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center">
-                         {incomingTransfers.filter(t => t.status !== 'COMPLETED').length}
-                       </span>
-                     )}
+                    {shouldShowNewTransferIndicator && (
+                      <span
+                        className="absolute -top-1.5 -right-1.5 h-3 w-3 rounded-full bg-red-500 ring-2 ring-white"
+                        title="New unverified shipments"
+                      />
+                    )}
                    </button>
 
                    {/* Quick Actions Dropdown */}
@@ -986,9 +1741,9 @@ const Inventory: React.FC<InventoryProps> = ({
                  </div>
                  <button
                    onClick={() => setShowBulkImportModal(true)}
-                   className="flex items-center gap-2 px-5 py-3 bg-slate-600 text-white rounded-xl hover:bg-slate-700 font-bold shadow-lg"
+                   className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-600 text-white text-sm rounded-xl hover:bg-slate-700 font-semibold shadow-lg"
                  >
-                   <Download size={20} /> Bulk Import
+                   <Download size={18} /> Bulk Import
                  </button>
                  {currentUser?.role === 'SUPER_ADMIN' && (
                    <button
@@ -1005,33 +1760,33 @@ const Inventory: React.FC<InventoryProps> = ({
                          }
                        }
                      }}
-                     className="flex items-center gap-2 px-5 py-3 bg-red-600 text-white rounded-xl hover:bg-red-700 font-bold shadow-lg"
-                     title="Clear all products (Super Admin only)"
-                   >
-                     <Archive size={20} /> Clear All Products
-                   </button>
+                    className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white text-sm rounded-xl hover:bg-red-700 font-semibold shadow-lg"
+                    title="Clear all products (Super Admin only)"
+                  >
+                    <Archive size={18} /> Clear All Products
+                  </button>
                  )}
                  </>
              ) : (
                  <>
                  <button
                    onClick={() => setShowRequestModal(true)}
-                   className="flex items-center gap-2 px-5 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 font-bold shadow-lg"
+                   className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white text-sm rounded-xl hover:bg-blue-700 font-semibold shadow-lg"
                  >
-                   <FilePlus size={20} /> Request Stock
+                   <FilePlus size={18} /> Request Stock
                  </button>
                  <button
                    onClick={() => showInfo("Quick Stock Entry", "Quick stock entry modal will be implemented soon.")}
-                   className="flex items-center gap-2 px-5 py-3 bg-green-600 text-white rounded-xl hover:bg-green-700 font-bold shadow-lg"
+                   className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 text-white text-sm rounded-xl hover:bg-green-700 font-semibold shadow-lg"
                  >
-                   <PackagePlus size={20} /> Quick Add
+                   <PackagePlus size={18} /> Quick Add
                  </button>
                  <button
                    onClick={handleMsdSync}
                    disabled={isSyncingMSD}
-                   className="flex items-center gap-2 px-5 py-3 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 font-bold disabled:opacity-70"
+                   className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-slate-200 text-slate-700 text-sm rounded-xl hover:bg-slate-50 font-semibold disabled:opacity-70"
                  >
-                   {isSyncingMSD ? <Loader className="animate-spin" size={20} /> : <RefreshCcw size={20} />}
+                   {isSyncingMSD ? <Loader className="animate-spin" size={18} /> : <RefreshCcw size={18} />}
                    Sync MSD
                  </button>
                  </>
@@ -1039,92 +1794,160 @@ const Inventory: React.FC<InventoryProps> = ({
          </div>
        </div>
 
-       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4 hover:shadow-md transition-shadow cursor-pointer">
-              <div className="p-4 bg-teal-50 text-teal-600 rounded-full">
-                  <Package size={24} />
+       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4">
+          <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-3 hover:shadow-md transition-shadow cursor-pointer">
+              <div className="p-3 bg-teal-50 text-teal-600 rounded-full">
+                  <Package size={20} />
               </div>
               <div>
-                  <p className="text-sm text-slate-500 font-medium">Total SKU Count</p>
-                  <h3 className="text-2xl font-bold text-slate-900">{products.length}</h3>
+                  <p className="text-xs text-slate-500 font-medium">Total SKU Count</p>
+                  <h3 className="text-xl font-bold text-slate-900">{products.length}</h3>
                   <p className="text-xs text-slate-400">Active products</p>
               </div>
           </div>
-          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4 hover:shadow-md transition-shadow cursor-pointer">
-              <div className="p-4 bg-blue-50 text-blue-600 rounded-full">
-                  <DollarSign size={24} />
+          <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-3 hover:shadow-md transition-shadow cursor-pointer">
+              <div className="p-3 bg-blue-50 text-blue-600 rounded-full">
+                  <DollarSign size={20} />
               </div>
               <div>
-                  <p className="text-sm text-slate-500 font-medium">Total Asset Value</p>
-                  <h3 className="text-2xl font-bold text-slate-900">{fmtCurrency(totalAssetValue)} TZS</h3>
+                  <p className="text-xs text-slate-500 font-medium">Total Asset Value</p>
+                  <h3 className="text-xl font-bold text-slate-900">{fmtCurrency(totalAssetValue)} TZS</h3>
                   <p className="text-xs text-slate-400">Cost Basis</p>
               </div>
           </div>
-          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4 hover:shadow-md transition-shadow cursor-pointer">
-              <div className="p-4 bg-emerald-50 text-emerald-600 rounded-full">
-                  <TrendingUp size={24} />
+          <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-3 hover:shadow-md transition-shadow cursor-pointer">
+              <div className="p-3 bg-emerald-50 text-emerald-600 rounded-full">
+                  <TrendingUp size={20} />
               </div>
               <div>
-                  <p className="text-sm text-slate-500 font-medium">Projected Revenue</p>
-                  <h3 className="text-2xl font-bold text-slate-900">{fmtCurrency(totalRetailValue)} TZS</h3>
+                  <p className="text-xs text-slate-500 font-medium">Projected Revenue</p>
+                  <h3 className="text-xl font-bold text-slate-900">{fmtCurrency(totalRetailValue)} TZS</h3>
                   <p className="text-xs text-slate-400">Retail Basis</p>
               </div>
           </div>
-           <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4 hover:shadow-md transition-shadow cursor-pointer">
-              <div className="p-4 bg-amber-50 text-amber-600 rounded-full">
-                  <AlertTriangle size={24} />
+           <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-3 hover:shadow-md transition-shadow cursor-pointer">
+              <div className="p-3 bg-amber-50 text-amber-600 rounded-full">
+                  <AlertTriangle size={20} />
               </div>
               <div>
-                  <p className="text-sm text-slate-500 font-medium">Low Stock Alerts</p>
-                  <h3 className="text-2xl font-bold text-slate-900">{mergedInventory.filter(i => i.quantity <= i.minStockLevel).length}</h3>
+                  <p className="text-xs text-slate-500 font-medium">Low Stock Alerts</p>
+                  <h3 className="text-xl font-bold text-slate-900">{mergedInventory.filter(i => i.quantity <= i.minStockLevel).length}</h3>
                   <p className="text-xs text-slate-400">Need attention</p>
               </div>
           </div>
        </div>
 
-       <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-fit">
+       <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-full sm:w-fit overflow-x-auto">
            <button
               onClick={() => setActiveTab('stock')}
-              className={`px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${activeTab === 'stock' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              className={`px-3 sm:px-4 py-2 rounded-lg font-semibold text-xs sm:text-sm transition-all flex items-center gap-2 whitespace-nowrap ${activeTab === 'stock' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
            >
                <Package size={16} /> Current Stock
            </button>
            <button
               onClick={() => setActiveTab('transfers')}
-              className={`px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${activeTab === 'transfers' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              className={`px-3 sm:px-4 py-2 rounded-lg font-semibold text-xs sm:text-sm transition-all flex items-center gap-2 whitespace-nowrap ${activeTab === 'transfers' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
            >
                <Truck size={16} /> Transfers
-               {incomingTransfers.filter(t => t.status !== 'COMPLETED').length > 0 && <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full">{incomingTransfers.filter(t => t.status !== 'COMPLETED').length}</span>}
+              {shouldShowNewTransferIndicator && <span className="h-2.5 w-2.5 rounded-full bg-red-500 inline-block" title="New unverified shipments" />}
            </button>
            <button
               onClick={() => showInfo("Analytics", "Inventory analytics will be implemented soon.")}
-              className={`px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 text-slate-500 hover:text-slate-700`}
+              className={`px-3 sm:px-4 py-2 rounded-lg font-semibold text-xs sm:text-sm transition-all flex items-center gap-2 whitespace-nowrap text-slate-500 hover:text-slate-700`}
            >
                <TrendingUp size={16} /> Analytics
+           </button>
+           <button
+              onClick={handleExportPDF}
+              className="px-3 sm:px-4 py-2 rounded-lg font-semibold text-xs sm:text-sm transition-all flex items-center gap-2 whitespace-nowrap text-slate-500 hover:text-slate-700"
+              title="Export to PDF"
+           >
+               <FileText size={16} /> Export PDF
+           </button>
+           <button
+              onClick={handleExportExcel}
+              className="px-3 sm:px-4 py-2 rounded-lg font-semibold text-xs sm:text-sm transition-all flex items-center gap-2 whitespace-nowrap text-slate-500 hover:text-slate-700"
+              title="Export to Excel"
+           >
+               <BarChart3 size={16} /> Export Excel
+           </button>
+           <button
+              onClick={handleOpenRestockInvoices}
+              className="px-3 sm:px-4 py-2 rounded-lg font-semibold text-xs sm:text-sm transition-all flex items-center gap-2 whitespace-nowrap text-slate-500 hover:text-slate-700"
+              title="View Restock Invoices"
+           >
+               <FilePlus size={16} /> Restock Invoices
            </button>
        </div>
 
        <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
            {activeTab === 'stock' && (
                <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+                   {!isHeadOffice && (
+                     <div className="p-4 border-b border-slate-100 bg-slate-50">
+                       <div className="flex items-center justify-between mb-3">
+                         <h3 className="font-bold text-slate-800">Request Stock Status</h3>
+                         <button
+                           onClick={refreshRequisitions}
+                           className="px-2.5 py-1.5 text-xs font-semibold text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50"
+                         >
+                           Refresh
+                         </button>
+                       </div>
+                       {isLoadingRequestHistory ? (
+                         <p className="text-sm text-slate-500">Loading requests...</p>
+                       ) : requestHistory.length === 0 ? (
+                         <p className="text-sm text-slate-500">No submitted stock requests yet.</p>
+                       ) : (
+                         <div className="space-y-2 max-h-48 overflow-y-auto">
+                           {requestHistory.map((req) => {
+                             const status = String(req?.status || 'PENDING').toUpperCase();
+                             const statusClass =
+                               status === 'APPROVED'
+                                 ? 'bg-emerald-100 text-emerald-700'
+                                 : status === 'REJECTED'
+                                   ? 'bg-red-100 text-red-700'
+                                   : 'bg-amber-100 text-amber-700';
+                             const requestedAt = req?.requestDate || req?.created_at || '';
+                             const itemCount = Array.isArray(req?.items) ? req.items.length : Number(req?.total_items || 0);
+                             return (
+                               <div key={req.id} className="bg-white border border-slate-200 rounded-lg p-3">
+                                 <div className="flex items-center justify-between gap-3">
+                                   <div>
+                                     <p className="text-sm font-semibold text-slate-800">{req.id}</p>
+                                     <p className="text-xs text-slate-500">
+                                       {itemCount} item(s) • {requestedAt ? new Date(requestedAt).toLocaleString() : 'No date'}
+                                     </p>
+                                   </div>
+                                   <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${statusClass}`}>
+                                     {status}
+                                   </span>
+                                 </div>
+                               </div>
+                             );
+                           })}
+                         </div>
+                       )}
+                     </div>
+                   )}
                    {/* Table Controls */}
-                   <div className="p-4 border-b border-slate-100 bg-slate-50">
+                   <div className="p-3 sm:p-4 border-b border-slate-100 bg-slate-50">
                        <div className="flex items-center justify-between">
-                           <div className="flex items-center gap-4">
-                               <div className="flex items-center gap-2">
+                           <div className="flex flex-col lg:flex-row w-full gap-2 lg:gap-4">
+                               <div className="flex items-center gap-2 w-full lg:w-auto">
                                    <Search size={16} className="text-slate-400" />
                                    <input
                                        type="text"
                                        placeholder="Search products..."
                                        value={searchQuery}
                                        onChange={(e) => setSearchQuery(e.target.value)}
-                                       className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
+                                       className="w-full lg:w-auto px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
                                    />
                                </div>
                                <select
                                    value={categoryFilter}
                                    onChange={(e) => setCategoryFilter(e.target.value)}
-                                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
+                                   className="w-full lg:w-auto px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
                                >
                                    <option value="">All Categories</option>
                                    {[...new Set(products.map(p => p.category))].map(cat => (
@@ -1134,7 +1957,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                <select
                                    value={stockFilter}
                                    onChange={(e) => setStockFilter(e.target.value)}
-                                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
+                                   className="w-full lg:w-auto px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
                                >
                                    <option value="">All Stock Levels</option>
                                    <option value="low">Low Stock</option>
@@ -1145,7 +1968,8 @@ const Inventory: React.FC<InventoryProps> = ({
                        </div>
                    </div>
 
-                   <table className="w-full text-left">
+                   <div className="overflow-x-auto">
+                   <table className="w-full min-w-[920px] text-left">
                        <thead className="bg-slate-50 text-slate-600 font-semibold uppercase text-xs">
                            <tr>
                                <th className="px-4 py-3 text-center">
@@ -1245,7 +2069,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                           </button>
 
                                           {/* Set Price Button */}
-                                          {(currentUser?.role === 'SUPER_ADMIN' || currentUser?.role === 'BRANCH_MANAGER' || currentUser?.role === 'INVENTORY_CONTROLLER') && (
+                                          {isSuperAdmin && (
                                               <button
                                                   onClick={() => {
                                                       setPriceModalData({ product: item, newPrice: item.branchPrice?.toString() || '' });
@@ -1259,7 +2083,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                           )}
 
                                           {/* Add Stock Button */}
-                                          {(currentUser?.role === 'SUPER_ADMIN' || currentUser?.role === 'BRANCH_MANAGER' || currentUser?.role === 'INVENTORY_CONTROLLER' || currentUser?.role === 'STORE_KEEPER') && (
+                                          {(isSuperAdmin || isBranchManager || isStoreKeeperRole) && (
                                               <button
                                                   onClick={() => {
                                                       // Reset form first
@@ -1287,7 +2111,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                           )}
 
                                           {/* Edit Cost Button */}
-                                          {(currentUser?.role === 'SUPER_ADMIN' || currentUser?.role === 'BRANCH_MANAGER') && (
+                                          {currentUser?.role === 'SUPER_ADMIN' && (
                                               <button
                                                   onClick={() => {
                                                       setEditModalData({ product: item, field: 'costPrice', value: item.costPrice?.toString() || '' });
@@ -1320,6 +2144,7 @@ const Inventory: React.FC<InventoryProps> = ({
                            ))}
                        </tbody>
                    </table>
+                   </div>
                </div>
            )}
 
@@ -1336,73 +2161,136 @@ const Inventory: React.FC<InventoryProps> = ({
                            {incomingTransfers.length === 0 ? (
                                <div className="p-8 text-center text-slate-400">No incoming shipments.</div>
                            ) : (
-                               incomingTransfers.map(t => (
-                                   <div key={t.id} className="p-6">
-                                       <div className="flex justify-between items-start mb-4">
-                                           <div>
-                                               <h4 className="font-bold text-lg text-slate-800">{t.id}</h4>
-                                               <p className="text-sm text-slate-500">From: {branches.find(b => b.id === t.sourceBranchId)?.name || 'Unknown Branch'}</p>
-                                               <p className="text-sm text-slate-500">Date: {t.dateSent}</p>
-                                           </div>
-                                           <div className="text-right flex flex-col gap-2">
-                                               <span className={`px-3 py-1 rounded-full text-xs font-bold ${t.status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-700' : t.status === 'RECEIVED_KEEPER' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
-                                                   {t.status.replace('_', ' ')}
-                                               </span>
-                                               {(t.keeperCode || t.controllerCode) && (
+                               <>
+                                   {activeIncomingTransfers.map(t => {
+                                       const transferStatus = normalizeTransferStatus(t.status);
+                                       const keeperVerified = Boolean(t.verifiedBy?.storeKeeper);
+                                       const controllerVerified = Boolean(t.verifiedBy?.inventoryController);
+                                       const workflowStatus = incomingTransferWorkflowStatus(t);
+                                       const targetBranchMatches = branchIdsMatch(t.targetBranchId, effectiveBranchId);
+                                       return (
+                                       <div key={t.id} className="p-4 sm:p-5">
+                                           <div className="flex flex-col sm:flex-row justify-between sm:items-start mb-4 gap-3">
+                                               <div>
+                                                   <h4 className="font-bold text-base text-slate-800">{t.id}</h4>
+                                                   <p className="text-sm text-slate-500">From: {getBranchDisplayName(t.sourceBranchId)}</p>
+                                                   <p className="text-sm text-slate-500">Date: {t.dateSent}</p>
+                                               </div>
+                                               <div className="text-left sm:text-right flex flex-col gap-2">
+                                                   <span className={`px-3 py-1 rounded-full text-xs font-bold ${workflowStatus === 'COMPLETED' ? 'bg-emerald-100 text-emerald-700' : workflowStatus === 'RECEIVED_KEEPER' ? 'bg-amber-100 text-amber-700' : workflowStatus === 'REJECTED' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`}>
+                                                       {workflowStatus.replace('_', ' ')}
+                                                   </span>
                                                    <button
                                                        onClick={() => { setSelectedTransferForCodes(t); setShowViewCodesModal(true); }}
                                                        className="px-3 py-1 bg-slate-600 text-white text-xs font-bold rounded-lg hover:bg-slate-700"
                                                    >
-                                                       View Codes
+                                                       View Details
                                                    </button>
-                                               )}
+                                               </div>
                                            </div>
-                                       </div>
 
-                                       {t.status !== 'COMPLETED' && !isHeadOffice && (
-                                           <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mt-4">
+                                           {workflowStatus === 'REJECTED' ? (
+                                               <div className="bg-red-50 p-3 sm:p-4 rounded-xl border border-red-200 mt-4">
+                                                   <h5 className="font-bold text-red-700 text-sm">Shipment Rejected</h5>
+                                                   <p className="text-xs text-red-600 mt-1">This transfer was rejected at receiving branch verification level.</p>
+                                               </div>
+                                           ) : (
+                                           <div className="bg-slate-50 p-3 sm:p-4 rounded-xl border border-slate-200 mt-4">
                                                <h5 className="font-bold text-slate-700 text-sm mb-3">Verification Required</h5>
-                                               <div className="flex items-center gap-4">
-                                                   <div className={`flex-1 flex items-center gap-3 p-3 rounded-lg border ${t.status === 'IN_TRANSIT' ? 'bg-white border-blue-200' : 'bg-slate-100 border-slate-200 opacity-50'}`}>
+                                               <div className="flex flex-col lg:flex-row items-stretch lg:items-center gap-3 lg:gap-4">
+                                                   <div className={`flex-1 flex items-center gap-3 p-3 rounded-lg border ${!keeperVerified ? 'bg-white border-blue-200' : 'bg-slate-100 border-slate-200 opacity-50'}`}>
                                                        <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold">1</div>
                                                        <div>
                                                            <p className="font-bold text-sm">Store Keeper</p>
                                                            <p className="text-xs text-slate-500">Confirm Physical Receipt</p>
                                                        </div>
-                                                       {t.verifiedBy?.storeKeeper ? (
+                                                       {keeperVerified ? (
                                                            <CheckCircle size={18} className="ml-auto text-emerald-500" />
-                                                       ) : t.status === 'IN_TRANSIT' ? (
-                                                           <button onClick={() => { setActiveTransferId(t.id); setVerifyStep('KEEPER'); setShowVerifyModal(true); }} className="ml-auto px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-700">
-                                                               Verify
-                                                           </button>
+                                                       ) : transferStatus !== 'COMPLETED' && canKeeperVerify && (isSuperAdmin || targetBranchMatches) ? (
+                                                           <div className="ml-auto flex items-center gap-1.5">
+                                                               <button onClick={() => openVerifyModal(t.id, 'KEEPER')} className="px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-700">
+                                                                   Verify
+                                                               </button>
+                                                               <button onClick={() => openRejectTransferModal(t.id, 'KEEPER')} className="px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded-lg hover:bg-red-700">
+                                                                   Reject
+                                                               </button>
+                                                           </div>
                                                        ) : (
                                                            <div className="ml-auto w-4 h-4" />
                                                        )}
                                                    </div>
 
-                                                   <ArrowRight className="text-slate-300" />
+                                                   <ArrowRight className="text-slate-300 hidden lg:block" />
 
-                                                   <div className={`flex-1 flex items-center gap-3 p-3 rounded-lg border ${t.status === 'RECEIVED_KEEPER' ? 'bg-white border-teal-200' : 'bg-slate-100 border-slate-200 opacity-50'}`}>
+                                                   <div className={`flex-1 flex items-center gap-3 p-3 rounded-lg border ${keeperVerified ? 'bg-white border-teal-200' : 'bg-slate-100 border-slate-200 opacity-50'}`}>
                                                        <div className="w-8 h-8 rounded-full bg-teal-100 text-teal-600 flex items-center justify-center font-bold">2</div>
                                                        <div>
                                                            <p className="font-bold text-sm">Inventory Controller</p>
                                                            <p className="text-xs text-slate-500">Quality Check & Make Available for POS</p>
                                                        </div>
-                                                       {t.verifiedBy?.inventoryController ? (
+                                                       {controllerVerified ? (
                                                            <CheckCircle size={18} className="ml-auto text-emerald-500" />
-                                                       ) : t.verifiedBy?.storeKeeper ? (
-                                                           <button onClick={() => { setActiveTransferId(t.id); setVerifyStep('CONTROLLER'); setShowVerifyModal(true); }} className="ml-auto px-3 py-1.5 bg-teal-600 text-white text-xs font-bold rounded-lg hover:bg-teal-700">
-                                                               Verify & Release
-                                                           </button>
+                                                       ) : keeperVerified && canControllerVerify && (isSuperAdmin || targetBranchMatches) ? (
+                                                           <div className="ml-auto flex items-center gap-1.5">
+                                                               <button onClick={() => openVerifyModal(t.id, 'CONTROLLER')} className="px-3 py-1.5 bg-teal-600 text-white text-xs font-bold rounded-lg hover:bg-teal-700">
+                                                                   Verify & Release
+                                                               </button>
+                                                               <button onClick={() => openRejectTransferModal(t.id, 'CONTROLLER')} className="px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded-lg hover:bg-red-700">
+                                                                   Reject
+                                                               </button>
+                                                           </div>
                                                        ) : (
                                                            <div className="ml-auto w-4 h-4" />
                                                        )}
                                                    </div>
                                                </div>
                                            </div>
-                                       )}
-                                   </div>
-                               ))
+                                           )}
+                                       </div>
+                                   );
+                                   })}
+
+                                   {completedIncomingTransfers.length > 0 && (
+                                       <div className="p-4 sm:p-5 bg-emerald-50/40">
+                                           <button
+                                               type="button"
+                                               onClick={() => setCollapseCompletedIncoming((prev) => !prev)}
+                                               className="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-white border border-emerald-200 text-emerald-800 hover:bg-emerald-50 transition-colors"
+                                           >
+                                               <span className="font-semibold text-sm">
+                                                   Completed Transfers ({completedIncomingTransfers.length})
+                                               </span>
+                                               {collapseCompletedIncoming ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                                           </button>
+                                           {!collapseCompletedIncoming && (
+                                               <div className="mt-3 space-y-3">
+                                                   {completedIncomingTransfers.map((t) => (
+                                                       <div key={t.id} className="p-4 rounded-xl border border-emerald-200 bg-white">
+                                                           <div className="flex flex-col sm:flex-row justify-between sm:items-start gap-3">
+                                                               <div>
+                                                                   <h4 className="font-bold text-base text-slate-800">{t.id}</h4>
+                                                                   <p className="text-sm text-slate-500">From: {getBranchDisplayName(t.sourceBranchId)}</p>
+                                                                   <p className="text-sm text-slate-500">Date: {t.dateSent}</p>
+                                                               </div>
+                                                               <div className="text-left sm:text-right flex flex-col gap-2">
+                                                                   <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-700">
+                                                                       COMPLETED
+                                                                   </span>
+                                                                   <button
+                                                                       onClick={() => { setSelectedTransferForCodes(t); setShowViewCodesModal(true); }}
+                                                                       className="px-3 py-1 bg-slate-600 text-white text-xs font-bold rounded-lg hover:bg-slate-700"
+                                                                   >
+                                                                       View Details
+                                                                   </button>
+                                                               </div>
+                                                           </div>
+                                                       </div>
+                                                   ))}
+                                               </div>
+                                           )}
+                                       </div>
+                                   )}
+                               </>
                            )}
                        </div>
                    </div>
@@ -1417,25 +2305,23 @@ const Inventory: React.FC<InventoryProps> = ({
                            </div>
                            <div className="divide-y divide-slate-100">
                                {outgoingTransfers.map(t => (
-                                   <div key={t.id} className="p-6">
-                                       <div className="flex justify-between items-start mb-4">
+                                   <div key={t.id} className="p-4 sm:p-5">
+                                       <div className="flex flex-col sm:flex-row justify-between sm:items-start mb-4 gap-3">
                                            <div>
-                                               <h4 className="font-bold text-lg text-slate-800">{t.id}</h4>
-                                               <p className="text-sm text-slate-500">To: {branches.find(b => b.id === t.targetBranchId)?.name || 'Unknown Branch'}</p>
+                                               <h4 className="font-bold text-base text-slate-800">{t.id}</h4>
+                                               <p className="text-sm text-slate-500">To: {getBranchDisplayName(t.targetBranchId)}</p>
                                                <p className="text-sm text-slate-500">Date: {t.dateSent}</p>
                                            </div>
-                                           <div className="text-right flex flex-col gap-2">
+                                           <div className="text-left sm:text-right flex flex-col gap-2">
                                                <span className={`px-3 py-1 rounded-full text-xs font-bold ${t.status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-700' : t.status === 'RECEIVED_KEEPER' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
                                                    {t.status.replace('_', ' ')}
                                                </span>
-                                               {t.verifiedBy?.storeKeeper && (
-                                                   <button
-                                                       onClick={() => { setSelectedTransferForCodes(t); setShowViewCodesModal(true); }}
-                                                       className="px-3 py-1 bg-slate-600 text-white text-xs font-bold rounded-lg hover:bg-slate-700"
-                                                   >
-                                                       View Details
-                                                   </button>
-                                               )}
+                                               <button
+                                                   onClick={() => { setSelectedTransferForCodes(t); setShowViewCodesModal(true); }}
+                                                   className="px-3 py-1 bg-slate-600 text-white text-xs font-bold rounded-lg hover:bg-slate-700"
+                                               >
+                                                   View Details
+                                               </button>
                                            </div>
                                        </div>
                                    </div>
@@ -1443,6 +2329,7 @@ const Inventory: React.FC<InventoryProps> = ({
                            </div>
                        </div>
                    )}
+
                </div>
            )}
        </div>
@@ -1450,7 +2337,7 @@ const Inventory: React.FC<InventoryProps> = ({
        {/* Add Stock Modal */}
        {showAddModal && (
          <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-             <div className="bg-white rounded-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+             <div className="bg-white rounded-2xl w-full max-w-3xl p-6 max-h-[90vh] overflow-y-auto">
                  <div className="flex justify-between items-center mb-6">
                      <h3 className="text-xl font-bold text-slate-900">Add Stock</h3>
                      <button onClick={() => {
@@ -1460,12 +2347,36 @@ const Inventory: React.FC<InventoryProps> = ({
                              costPrice: '', price: '', unit: 'Box', minStock: '10',
                              batchNumber: '', expiryDate: '', quantity: ''
                          });
+                         setRestockExistingForm({
+                           items: [],
+                           supplierId: '',
+                           supplierName: '',
+                           isNewSupplier: false,
+                           newSupplierName: ''
+                         });
+                         setCurrentRestockItem({
+                           productId: '',
+                           quantity: 0,
+                           batchNumber: '',
+                           expiryDate: '',
+                           costPrice: 0,
+                           sellingPrice: 0
+                         });
                      }}><X size={24} className="text-slate-400" /></button>
                  </div>
 
                  <div className="flex bg-slate-100 p-1 rounded-lg mb-6">
                      <button
-                         onClick={() => setAddMode('EXISTING')}
+                         onClick={() => {
+                           setAddMode('EXISTING');
+                           setRestockExistingForm({
+                             items: [],
+                             supplierId: '',
+                             supplierName: '',
+                             isNewSupplier: false,
+                             newSupplierName: ''
+                           });
+                         }}
                          className={`flex-1 py-2 rounded-md text-sm font-bold transition-all ${addMode === 'EXISTING' ? 'bg-white shadow-sm text-teal-700' : 'text-slate-500 hover:text-slate-700'}`}
                      >
                          Restock Existing
@@ -1478,97 +2389,291 @@ const Inventory: React.FC<InventoryProps> = ({
                      </button>
                  </div>
 
-                 <div className="space-y-4">
-                      {addMode === 'EXISTING' && newStock.productId && (
-                          <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
-                              <p className="text-sm font-bold text-blue-800">
-                                  {products.find(p => p.id === newStock.productId)?.name || 'Unknown Product'}
-                              </p>
-                              <p className="text-xs text-blue-600 mt-1">
-                                  Current Stock: {mergedInventory.find(i => i.id === newStock.productId)?.quantity || 0} units
-                              </p>
-                          </div>
-                      )}
+                 {addMode === 'EXISTING' ? (
+                   <div className="space-y-4">
+                     {/* Supplier Selection */}
+                     <div className="space-y-2">
+                       <label className="block text-sm font-bold text-slate-700">Supplier / Customer (Optional)</label>
+                       {!restockExistingForm.isNewSupplier ? (
+                         <>
+                           <select
+                             className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
+                             value={restockExistingForm.supplierId}
+                             onChange={(e) => {
+                               const supplier = savedRestockSources.find(s => s.id === e.target.value);
+                               setRestockExistingForm({
+                                 ...restockExistingForm,
+                                 supplierId: e.target.value,
+                                 supplierName: supplier?.name || ''
+                               });
+                             }}
+                           >
+                             <option value="">Select Saved Supplier/Customer</option>
+                             {savedRestockSources.map(s => (
+                               <option key={s.id} value={s.id}>
+                                 {s.name} ({s.type})
+                               </option>
+                             ))}
+                           </select>
+                           <button
+                             onClick={() => setRestockExistingForm({...restockExistingForm, isNewSupplier: true})}
+                             className="w-full text-center p-3 border-2 border-teal-500 text-teal-600 rounded-lg hover:bg-teal-50 font-semibold"
+                           >
+                             + Add New Supplier Name
+                           </button>
+                         </>
+                       ) : (
+                         <>
+                           <input
+                             type="text"
+                             className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
+                             placeholder="New Supplier Name"
+                             value={restockExistingForm.newSupplierName}
+                             onChange={(e) => setRestockExistingForm({...restockExistingForm, newSupplierName: e.target.value})}
+                           />
+                           <button
+                             onClick={() => setRestockExistingForm({...restockExistingForm, isNewSupplier: false, newSupplierName: ''})}
+                             className="w-full p-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg"
+                           >
+                             Use Saved Supplier/Customer Instead
+                           </button>
+                         </>
+                       )}
+                     </div>
 
-                      {addMode === 'NEW' ? (
-                          <>
-                             <input 
-                                 className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
-                                 placeholder="Product Name *" 
-                                 value={newStock.name} 
-                                 onChange={e => setNewStock({...newStock, name: e.target.value})} 
-                             />
-                             <input 
-                                 className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
-                                 placeholder="Generic Name" 
-                                 value={newStock.genericName} 
-                                 onChange={e => setNewStock({...newStock, genericName: e.target.value})} 
-                             />
-                             <div className="grid grid-cols-2 gap-4">
-                                 <input 
-                                     className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
-                                     placeholder="Category" 
-                                     value={newStock.category} 
-                                     onChange={e => setNewStock({...newStock, category: e.target.value})} 
-                                 />
-                                 <input 
-                                     className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
-                                     placeholder="Unit" 
-                                     value={newStock.unit} 
-                                     onChange={e => setNewStock({...newStock, unit: e.target.value})} 
-                                 />
-                             </div>
-                             <div className="grid grid-cols-2 gap-4">
-                                 <input 
-                                     type="number" 
-                                     className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
-                                     placeholder="Cost Price *" 
-                                     value={newStock.costPrice} 
-                                     onChange={e => setNewStock({...newStock, costPrice: e.target.value})} 
-                                 />
-                                 <input 
-                                     type="number" 
-                                     className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
-                                     placeholder="Selling Price *" 
-                                     value={newStock.price} 
-                                     onChange={e => setNewStock({...newStock, price: e.target.value})} 
-                                 />
-                             </div>
-                          </>
-                      ) : ( 
-                          <select 
-                              className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
-                              value={newStock.productId} 
-                              onChange={e => setNewStock({...newStock, productId: e.target.value})}
-                          >
-                              <option value="">Select Product to Restock *</option>
-                              {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                          </select>
-                      )}
+                     {/* Add Product Item */}
+                     <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 space-y-3">
+                       <h4 className="font-bold text-slate-900">Add Products</h4>
+                       
+                       <select
+                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
+                         value={currentRestockItem.productId || ''}
+                         onChange={(e) => {
+                           const selectedProduct = products.find(p => p.id === e.target.value);
+                           setCurrentRestockItem({
+                             ...currentRestockItem,
+                             productId: e.target.value,
+                             costPrice: selectedProduct ? selectedProduct.costPrice : (currentRestockItem.costPrice || 0),
+                             sellingPrice: selectedProduct ? selectedProduct.price : (currentRestockItem.sellingPrice || 0)
+                           });
+                         }}
+                       >
+                         <option value="">Select Product *</option>
+                         {products.map(p => (
+                           <option key={p.id} value={p.id}>
+                             {p.name} (Current: {mergedInventory.find(i => i.id === p.id)?.quantity || 0} units)
+                           </option>
+                         ))}
+                       </select>
 
-                      <div className="grid grid-cols-2 gap-4">
-                          <input 
-                              className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
-                              placeholder="Batch Number" 
-                              value={newStock.batchNumber} 
-                              onChange={e => setNewStock({...newStock, batchNumber: e.target.value})} 
-                          />
-                          <input 
-                              type="date" 
-                              className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
-                              value={newStock.expiryDate} 
-                              onChange={e => setNewStock({...newStock, expiryDate: e.target.value})} 
-                          />
-                      </div>
-                      <input 
-                          type="number" 
-                          className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none font-bold" 
-                          placeholder="Quantity to Add *" 
-                          min="1"
-                          value={newStock.quantity} 
-                          onChange={e => setNewStock({...newStock, quantity: e.target.value})} 
-                      />
-                 </div>
+                       <div className="grid grid-cols-2 gap-3">
+                         <input
+                           type="text"
+                           className="p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
+                           placeholder="Batch Number"
+                           value={currentRestockItem.batchNumber || ''}
+                           onChange={(e) => setCurrentRestockItem({...currentRestockItem, batchNumber: e.target.value})}
+                         />
+                         <input
+                           type="date"
+                           className="p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
+                           value={currentRestockItem.expiryDate || ''}
+                           onChange={(e) => setCurrentRestockItem({...currentRestockItem, expiryDate: e.target.value})}
+                         />
+                       </div>
+
+                       <input
+                         type="number"
+                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none font-bold"
+                         placeholder="Quantity *"
+                         min="1"
+                         value={currentRestockItem.quantity || ''}
+                         onChange={(e) => setCurrentRestockItem({...currentRestockItem, quantity: parseInt(e.target.value) || 0})}
+                       />
+
+                       <div className="grid grid-cols-2 gap-3">
+                         <input
+                           type="number"
+                           className="p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
+                           placeholder="Buying Price *"
+                           min="0"
+                           step="0.01"
+                           value={currentRestockItem.costPrice ?? ''}
+                           onChange={(e) => setCurrentRestockItem({...currentRestockItem, costPrice: Number(e.target.value) || 0})}
+                         />
+                         <input
+                           type="number"
+                           className="p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
+                           placeholder="Selling Price *"
+                           min="0"
+                           step="0.01"
+                           value={currentRestockItem.sellingPrice ?? ''}
+                           onChange={(e) => setCurrentRestockItem({...currentRestockItem, sellingPrice: Number(e.target.value) || 0})}
+                         />
+                       </div>
+
+                       <button
+                         onClick={() => {
+                           if (!currentRestockItem.productId || !currentRestockItem.quantity || currentRestockItem.quantity <= 0) {
+                             showError('Missing Fields', 'Please select a product and enter a quantity.');
+                             return;
+                           }
+                           if (currentRestockItem.costPrice === undefined || Number(currentRestockItem.costPrice) < 0) {
+                             showError('Invalid Buying Price', 'Please enter a valid buying price (0 or more).');
+                             return;
+                           }
+                           if (currentRestockItem.sellingPrice === undefined || Number(currentRestockItem.sellingPrice) <= 0) {
+                             showError('Invalid Selling Price', 'Please enter a valid selling price greater than 0.');
+                             return;
+                           }
+                           const batchNumber = currentRestockItem.batchNumber || generateBatchNumber();
+                           const expiryDate = currentRestockItem.expiryDate || '';
+                           setRestockExistingForm({
+                             ...restockExistingForm,
+                             items: (() => {
+                               const nextItems = [...restockExistingForm.items];
+                               const existingIndex = nextItems.findIndex(
+                                 (item) =>
+                                   item.productId === currentRestockItem.productId &&
+                                   item.batchNumber === batchNumber &&
+                                   (item.expiryDate || '') === expiryDate
+                               );
+                               if (existingIndex >= 0) {
+                                 nextItems[existingIndex] = {
+                                   ...nextItems[existingIndex],
+                                   quantity: nextItems[existingIndex].quantity + (currentRestockItem.quantity || 0),
+                                   costPrice: Number(currentRestockItem.costPrice) || 0,
+                                   sellingPrice: Number(currentRestockItem.sellingPrice) || 0
+                                 };
+                               } else {
+                                 nextItems.push({
+                                   productId: currentRestockItem.productId,
+                                   quantity: currentRestockItem.quantity,
+                                   batchNumber,
+                                   expiryDate,
+                                   costPrice: Number(currentRestockItem.costPrice) || 0,
+                                   sellingPrice: Number(currentRestockItem.sellingPrice) || 0
+                                 });
+                               }
+                               return nextItems;
+                             })()
+                           });
+                           setCurrentRestockItem({
+                             productId: '',
+                             quantity: 0,
+                             batchNumber: '',
+                             expiryDate: '',
+                             costPrice: 0,
+                             sellingPrice: 0
+                           });
+                         }}
+                         className="w-full p-2 bg-teal-600 text-white font-bold rounded-lg hover:bg-teal-700"
+                       >
+                         + Add Product
+                       </button>
+                     </div>
+
+                     {/* Added Items List */}
+                     {restockExistingForm.items.length > 0 && (
+                       <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 space-y-2">
+                         <h4 className="font-bold text-blue-900">Items to Restock ({restockExistingForm.items.length})</h4>
+                         <div className="space-y-2 max-h-48 overflow-y-auto">
+                           {restockExistingForm.items.map((item, idx) => {
+                             const product = products.find(p => p.id === item.productId);
+                             return (
+                               <div key={idx} className="bg-white p-3 rounded-lg flex justify-between items-start border border-blue-100">
+                                 <div className="flex-1">
+                                   <p className="font-semibold text-slate-900">{product?.name}</p>
+                                   <p className="text-xs text-slate-600">Batch: {item.batchNumber} | Qty: {item.quantity} | Expiry: {item.expiryDate || 'N/A'}</p>
+                                   <p className="text-xs text-slate-600">Buy: {fmtCurrency(item.costPrice)} | Sell: {fmtCurrency(item.sellingPrice)}</p>
+                                 </div>
+                                 <button
+                                   onClick={() => {
+                                     setRestockExistingForm({
+                                       ...restockExistingForm,
+                                       items: restockExistingForm.items.filter((_, i) => i !== idx)
+                                     });
+                                   }}
+                                   className="px-2 py-1 bg-red-100 text-red-700 text-xs font-bold rounded hover:bg-red-200"
+                                 >
+                                   Remove
+                                 </button>
+                               </div>
+                             );
+                           })}
+                         </div>
+                       </div>
+                     )}
+                   </div>
+                 ) : (
+                   <div className="space-y-4">
+                     <input 
+                       className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
+                       placeholder="Product Name *" 
+                       value={newStock.name} 
+                       onChange={e => setNewStock({...newStock, name: e.target.value})} 
+                     />
+                     <input 
+                       className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
+                       placeholder="Generic Name" 
+                       value={newStock.genericName} 
+                       onChange={e => setNewStock({...newStock, genericName: e.target.value})} 
+                     />
+                     <div className="grid grid-cols-2 gap-4">
+                       <input 
+                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
+                         placeholder="Category" 
+                         value={newStock.category} 
+                         onChange={e => setNewStock({...newStock, category: e.target.value})} 
+                       />
+                       <input 
+                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
+                         placeholder="Unit" 
+                         value={newStock.unit} 
+                         onChange={e => setNewStock({...newStock, unit: e.target.value})} 
+                       />
+                     </div>
+                     <div className="grid grid-cols-2 gap-4">
+                       <input 
+                         type="number" 
+                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
+                         placeholder="Cost Price *" 
+                         value={newStock.costPrice} 
+                         onChange={e => setNewStock({...newStock, costPrice: e.target.value})} 
+                       />
+                       <input 
+                         type="number" 
+                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
+                         placeholder="Selling Price *" 
+                         value={newStock.price} 
+                         onChange={e => setNewStock({...newStock, price: e.target.value})} 
+                       />
+                     </div>
+                     <div className="grid grid-cols-2 gap-4">
+                       <input 
+                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
+                         placeholder="Batch Number" 
+                         value={newStock.batchNumber} 
+                         onChange={e => setNewStock({...newStock, batchNumber: e.target.value})} 
+                       />
+                       <input 
+                         type="date" 
+                         className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" 
+                         value={newStock.expiryDate} 
+                         onChange={e => setNewStock({...newStock, expiryDate: e.target.value})} 
+                       />
+                     </div>
+                     <input 
+                       type="number" 
+                       className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none font-bold" 
+                       placeholder="Quantity to Add *" 
+                       min="1"
+                       value={newStock.quantity} 
+                       onChange={e => setNewStock({...newStock, quantity: e.target.value})} 
+                     />
+                   </div>
+                 )}
+
                  <div className="mt-6 flex justify-end gap-3 border-t pt-4">
                      <button 
                          onClick={() => {
@@ -1578,6 +2683,13 @@ const Inventory: React.FC<InventoryProps> = ({
                                  costPrice: '', price: '', unit: 'Box', minStock: '10',
                                  batchNumber: '', expiryDate: '', quantity: ''
                              });
+                             setRestockExistingForm({
+                               items: [],
+                               supplierId: '',
+                               supplierName: '',
+                               isNewSupplier: false,
+                               newSupplierName: ''
+                             });
                          }} 
                          className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
                      >
@@ -1585,7 +2697,7 @@ const Inventory: React.FC<InventoryProps> = ({
                      </button>
                      <button
                          onClick={handleAddStock}
-                         disabled={addMode === 'EXISTING' ? !newStock.productId || !newStock.quantity : !newStock.name || !newStock.price || !newStock.quantity}
+                         disabled={addMode === 'EXISTING' ? restockExistingForm.items.length === 0 : !newStock.name || !newStock.price || !newStock.quantity}
                          className="px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                      >
                          {addMode === 'EXISTING' ? 'Restock' : 'Create Product'}
@@ -1597,14 +2709,14 @@ const Inventory: React.FC<InventoryProps> = ({
 
        {/* Transfer Modal */}
        {showTransferModal && (
-           <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-               <div className="bg-white rounded-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+           <div className="fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center p-2 sm:p-4">
+               <div className="bg-white rounded-2xl w-full max-w-3xl p-4 sm:p-6 max-h-[92vh] overflow-y-auto">
                    <div className="flex justify-between items-center mb-6">
-                       <h3 className="text-xl font-bold text-slate-900">Create New Shipment</h3>
+                       <h3 className="text-lg sm:text-xl font-bold text-slate-900">Create New Shipment</h3>
                        <button onClick={() => {
                            setShowTransferModal(false);
                            setNewShipment({ targetBranchId: '', notes: '', items: [] });
-                       }}><X size={24} className="text-slate-400" /></button>
+                       }} className="p-1.5 rounded-lg hover:bg-slate-100"><X size={24} className="text-slate-400" /></button>
                    </div>
 
                    <div className="space-y-4">
@@ -1616,17 +2728,17 @@ const Inventory: React.FC<InventoryProps> = ({
                                onChange={(e) => setNewShipment({...newShipment, targetBranchId: e.target.value})}
                            >
                                <option value="">-- Choose Branch --</option>
-                               {branches.filter(b => b.id !== currentBranchId).map(b => (
-                                   <option key={b.id} value={b.id}>{b.name}</option>
+                               {branches.filter(b => !branchIdsMatch(b.id, currentBranchId)).map(b => (
+                                   <option key={b.id} value={b.id}>{getBranchDisplayName(b.id, b.name)}</option>
                                ))}
                            </select>
                        </div>
 
                        <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6">
                            <h4 className="text-sm font-bold text-slate-700 mb-3">Add Items to Shipment</h4>
-                           <div className="flex gap-2 mb-4">
+                           <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_120px_auto] gap-2 mb-4 items-start sm:items-end">
                                <select
-                                   className="flex-1 p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                                   className="w-full min-w-0 p-2.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                                    value={currentItem.productId}
                                    onChange={(e) => setCurrentItem({...currentItem, productId: e.target.value})}
                                >
@@ -1639,7 +2751,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                </select>
                                <input
                                    type="number"
-                                   className="w-24 p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                                   className="w-full p-2.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                                    placeholder="Qty"
                                    min="1"
                                    value={currentItem.quantity}
@@ -1669,14 +2781,14 @@ const Inventory: React.FC<InventoryProps> = ({
                                                productId: currentItem.productId,
                                                productName: prod?.name,
                                                quantity: qty,
-                                               batchNumber: 'BATCH-' + Date.now(),
+                                               batchNumber: generateBatchNumber(),
                                                expiryDate: '2025-12-31'
                                            }]
                                        });
                                        setCurrentItem({ productId: '', quantity: '' });
                                        showSuccess("Item Added", `${prod?.name} added to shipment.`);
                                    }}
-                                   className="px-4 bg-teal-600 text-white rounded-lg font-bold hover:bg-teal-700"
+                                   className="w-full sm:w-auto px-4 py-2.5 bg-teal-600 text-white rounded-lg font-bold hover:bg-teal-700"
                                >
                                    Add
                                </button>
@@ -1687,7 +2799,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                    <p className="text-sm text-slate-400 text-center py-4">No items added yet</p>
                                ) : (
                                    newShipment.items.map((item, idx) => (
-                                       <div key={idx} className="flex justify-between items-center bg-white p-3 border border-slate-200 rounded text-sm">
+                                       <div key={idx} className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 bg-white p-3 border border-slate-200 rounded text-sm">
                                            <div>
                                                <p className="font-bold text-slate-800">{item.productName}</p>
                                                <p className="text-xs text-slate-500">Qty: {item.quantity}</p>
@@ -1700,7 +2812,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                                    });
                                                    showSuccess("Item Removed", "Item removed from shipment.");
                                                }}
-                                               className="p-2 text-red-600 hover:bg-red-50 rounded"
+                                               className="self-end sm:self-auto p-2 text-red-600 hover:bg-red-50 rounded"
                                            >
                                                <X size={16} />
                                            </button>
@@ -1721,20 +2833,20 @@ const Inventory: React.FC<InventoryProps> = ({
                            ></textarea>
                        </div>
                    </div>
-                   <div className="mt-6 flex justify-end gap-3 border-t pt-4">
+                   <div className="mt-6 flex flex-col-reverse sm:flex-row sm:justify-end gap-3 border-t pt-4 sticky bottom-0 bg-white">
                        <button
                            onClick={() => {
                                setShowTransferModal(false);
                                setNewShipment({ targetBranchId: '', notes: '', items: [] });
                            }}
-                           className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
+                           className="w-full sm:w-auto px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
                        >
                            Cancel
                        </button>
                        <button
                            onClick={handleDispatch}
                            disabled={!newShipment.targetBranchId || newShipment.items.length === 0}
-                           className="px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                           className="w-full sm:w-auto px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                        >
                            Dispatch Shipment
                        </button>
@@ -1951,7 +3063,7 @@ const Inventory: React.FC<InventoryProps> = ({
        {/* Verification Modal */}
        {showVerifyModal && (
            <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-               <div className="bg-white rounded-2xl w-full max-w-sm p-6">
+               <div className="bg-white rounded-2xl w-full max-w-lg p-6">
                    <div className="text-center mb-6">
                        <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-4">
                            <CheckCircle size={32} />
@@ -1974,18 +3086,93 @@ const Inventory: React.FC<InventoryProps> = ({
                        </p>
                    </div>
 
+                   <div className="bg-white border border-slate-200 rounded-lg p-4 mb-4">
+                       <p className="text-sm font-bold text-slate-800 mb-2">
+                           Shipment Contents ({activeTransferForVerification?.items?.length || 0} item(s))
+                       </p>
+                       {activeTransferForVerification?.items?.length ? (
+                           <div className="max-h-44 overflow-y-auto space-y-2">
+                               {activeTransferForVerification.items.map((item, idx) => (
+                                   <div key={`${item.productId}-${idx}`} className="flex justify-between text-sm border-b border-slate-100 pb-1">
+                                       <span className="text-slate-700 truncate pr-3">{item.productName}</span>
+                                       <span className="font-semibold text-slate-900 whitespace-nowrap">{fmtNumber(item.quantity)} units</span>
+                                   </div>
+                               ))}
+                           </div>
+                       ) : (
+                           <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2">
+                               No shipment items found for this transfer. Verify only if this is expected.
+                           </p>
+                       )}
+                   </div>
+
+                   <label className="flex items-start gap-2 text-sm text-slate-700 mb-6">
+                       <input
+                           type="checkbox"
+                           checked={hasReviewedShipmentContents}
+                           onChange={(e) => setHasReviewedShipmentContents(e.target.checked)}
+                           className="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                       />
+                       <span>I have reviewed the shipment contents above before verifying.</span>
+                   </label>
+
                    <div className="flex gap-2">
                        <button
-                           onClick={() => { setShowVerifyModal(false); setVerificationCode(''); setVerifyError(''); }}
+                           onClick={() => { setShowVerifyModal(false); setVerificationCode(''); setVerifyError(''); setHasReviewedShipmentContents(false); }}
                            className="flex-1 py-3 text-slate-600 font-bold bg-slate-100 rounded-xl hover:bg-slate-200"
                        >
                            Cancel
                        </button>
                        <button
                            onClick={handleVerifyTransfer}
-                           className="flex-1 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700"
+                           disabled={!hasReviewedShipmentContents}
+                           className="flex-1 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                        >
                            Confirm & Verify
+                       </button>
+                   </div>
+               </div>
+           </div>
+       )}
+
+       {/* Reject Transfer Modal */}
+       {showRejectModal && (
+           <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+               <div className="bg-white rounded-2xl w-full max-w-lg p-6">
+                   <div className="text-center mb-5">
+                       <h3 className="text-xl font-bold text-slate-900">Reject Shipment</h3>
+                       <p className="text-sm text-slate-500 mt-1">
+                           {rejectStep === 'KEEPER' ? 'Store Keeper' : 'Inventory Controller'} rejection for transfer #{rejectTransferId}
+                       </p>
+                   </div>
+
+                   <label className="block text-sm font-bold text-slate-700 mb-2">Reason (optional)</label>
+                   <textarea
+                       value={rejectReason}
+                       onChange={(e) => setRejectReason(e.target.value)}
+                       rows={4}
+                       className="w-full p-3 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-red-500 outline-none"
+                       placeholder="Write reason for rejecting this shipment..."
+                   />
+
+                   <div className="flex gap-2 mt-5">
+                       <button
+                           onClick={() => {
+                               if (isRejectingTransfer) return;
+                               setShowRejectModal(false);
+                               setRejectTransferId(null);
+                               setRejectReason('');
+                           }}
+                           className="flex-1 py-3 text-slate-600 font-bold bg-slate-100 rounded-xl hover:bg-slate-200"
+                       >
+                           Cancel
+                       </button>
+                       <button
+                           onClick={handleRejectTransfer}
+                           disabled={isRejectingTransfer}
+                           className="flex-1 py-3 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                       >
+                           {isRejectingTransfer ? 'Rejecting...' : 'Confirm Reject'}
                        </button>
                    </div>
                </div>
@@ -2002,8 +3189,13 @@ const Inventory: React.FC<InventoryProps> = ({
                        </div>
                        <h3 className="text-xl font-bold text-slate-900">Shipment Created Successfully</h3>
                        <p className="text-sm text-slate-500 mt-2">
-                           Transfer #{createdTransfer.id} dispatched to {branches.find(b => b.id === createdTransfer.targetBranchId)?.name}
+                           Transfer #{createdTransfer.id} dispatched to {getBranchDisplayName(createdTransfer.targetBranchId)}
                        </p>
+                       {createdShipmentMeta?.shipmentId && (
+                           <p className="text-xs text-slate-500 mt-1">
+                               Shipment #{createdShipmentMeta.shipmentId} created
+                           </p>
+                       )}
                    </div>
 
                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6">
@@ -2015,11 +3207,11 @@ const Inventory: React.FC<InventoryProps> = ({
                            </div>
                            <div className="flex justify-between">
                                <span className="text-slate-600">From:</span>
-                               <span className="text-slate-900">{createdTransfer.sourceBranchId}</span>
+                               <span className="text-slate-900">{getBranchDisplayName(createdTransfer.sourceBranchId, createdTransfer.sourceBranchId)}</span>
                            </div>
                            <div className="flex justify-between">
                                <span className="text-slate-600">To:</span>
-                               <span className="text-slate-900">{createdTransfer.targetBranchId}</span>
+                               <span className="text-slate-900">{getBranchDisplayName(createdTransfer.targetBranchId, createdTransfer.targetBranchId)}</span>
                            </div>
                            <div className="flex justify-between">
                                <span className="text-slate-600">Items:</span>
@@ -2029,6 +3221,12 @@ const Inventory: React.FC<InventoryProps> = ({
                                <span className="text-slate-600">Status:</span>
                                <span className="text-blue-600 font-medium">{createdTransfer.status}</span>
                            </div>
+                           {createdShipmentMeta?.invoiceId && (
+                               <div className="flex justify-between">
+                                   <span className="text-slate-600">Invoice ID:</span>
+                                   <span className="font-mono text-emerald-700">{createdShipmentMeta.invoiceId}</span>
+                               </div>
+                           )}
                        </div>
                    </div>
 
@@ -2036,6 +3234,7 @@ const Inventory: React.FC<InventoryProps> = ({
                        onClick={() => {
                            setShowTransferSuccessModal(false);
                            setCreatedTransfer(null);
+                           setCreatedShipmentMeta(null);
                        }}
                        className="w-full py-3 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700"
                    >
@@ -2045,13 +3244,100 @@ const Inventory: React.FC<InventoryProps> = ({
            </div>
        )}
 
-       {/* View Codes Modal */}
+       {/* View Details Modal */}
        {showViewCodesModal && selectedTransferForCodes && (
            <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-               <div className="bg-white rounded-2xl w-full max-w-md p-6">
+               <div className="bg-white rounded-2xl w-full max-w-3xl p-6 max-h-[90vh] overflow-y-auto">
+                   {(() => {
+                       const transferStatus = normalizeTransferStatus(selectedTransferForCodes.status);
+                       const keeperVerified = Boolean(selectedTransferForCodes.verifiedBy?.storeKeeper);
+                       const controllerVerified = Boolean(selectedTransferForCodes.verifiedBy?.inventoryController);
+                       const workflowStatus =
+                         controllerVerified || transferStatus === 'COMPLETED'
+                           ? 'COMPLETED'
+                           : keeperVerified
+                             ? 'RECEIVED_KEEPER'
+                             : transferStatus;
+                       const statusLabel =
+                         workflowStatus === 'RECEIVED_KEEPER'
+                           ? 'RECEIVED BY STORE KEEPER'
+                           : workflowStatus;
+                       const detailItems = (selectedTransferForCodes.items || []).map((item) => ({
+                           ...item,
+                           productName: item.productName || products.find(p => p.id === item.productId)?.name || item.productId || 'Unknown Product'
+                       }));
+
+                       return (
+                           <>
                    <div className="text-center mb-6">
                        <h3 className="text-xl font-bold text-slate-900">Transfer Verification Details</h3>
                        <p className="text-sm text-slate-500 mt-2">Transfer #{selectedTransferForCodes.id}</p>
+                   </div>
+
+                   <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6">
+                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                           <div>
+                               <p className="text-slate-500">From</p>
+                               <p className="font-semibold text-slate-800">{getBranchDisplayName(selectedTransferForCodes.sourceBranchId, selectedTransferForCodes.sourceBranchId)}</p>
+                           </div>
+                           <div>
+                               <p className="text-slate-500">To</p>
+                               <p className="font-semibold text-slate-800">{getBranchDisplayName(selectedTransferForCodes.targetBranchId, selectedTransferForCodes.targetBranchId)}</p>
+                           </div>
+                           <div>
+                               <p className="text-slate-500">Date Sent</p>
+                               <p className="font-semibold text-slate-800">{fmtDate(selectedTransferForCodes.dateSent)}</p>
+                           </div>
+                           <div>
+                               <p className="text-slate-500">Current Status</p>
+                               <span className={`inline-flex mt-1 px-2.5 py-1 rounded-full text-[11px] font-bold ${
+                                   workflowStatus === 'COMPLETED'
+                                     ? 'bg-emerald-100 text-emerald-700'
+                                     : workflowStatus === 'RECEIVED_KEEPER'
+                                       ? 'bg-amber-100 text-amber-700'
+                                       : 'bg-blue-100 text-blue-700'
+                               }`}>
+                                   {statusLabel.replace('_', ' ')}
+                               </span>
+                           </div>
+                       </div>
+                   </div>
+
+                   <div className="bg-white border border-slate-200 rounded-xl mb-6 overflow-hidden">
+                       <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
+                           <h5 className="font-bold text-slate-700">
+                               Shipment Products ({detailItems.length})
+                           </h5>
+                           <p className="text-xs text-slate-500 mt-1">
+                               Products to be received or already received for this transfer.
+                           </p>
+                       </div>
+                       {detailItems.length === 0 ? (
+                           <div className="p-4 text-sm text-slate-500">No products found for this transfer.</div>
+                       ) : (
+                           <div className="max-h-64 overflow-y-auto">
+                               <table className="w-full text-sm">
+                                   <thead className="bg-white sticky top-0 z-10">
+                                       <tr className="text-left border-b border-slate-200">
+                                           <th className="px-4 py-2.5 font-semibold text-slate-600">Product</th>
+                                           <th className="px-4 py-2.5 font-semibold text-slate-600">Qty</th>
+                                           <th className="px-4 py-2.5 font-semibold text-slate-600">Batch</th>
+                                           <th className="px-4 py-2.5 font-semibold text-slate-600">Expiry</th>
+                                       </tr>
+                                   </thead>
+                                   <tbody>
+                                       {detailItems.map((item, idx) => (
+                                           <tr key={`${item.productId}-${idx}`} className="border-b border-slate-100 last:border-0">
+                                               <td className="px-4 py-2.5 text-slate-800">{item.productName}</td>
+                                               <td className="px-4 py-2.5 text-slate-700 font-semibold">{fmtNumber(item.quantity)}</td>
+                                               <td className="px-4 py-2.5 text-slate-600">{item.batchNumber || 'N/A'}</td>
+                                               <td className="px-4 py-2.5 text-slate-600">{item.expiryDate ? fmtDate(item.expiryDate) : 'N/A'}</td>
+                                           </tr>
+                                       ))}
+                                   </tbody>
+                               </table>
+                           </div>
+                       )}
                    </div>
 
                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 space-y-3">
@@ -2101,6 +3387,9 @@ const Inventory: React.FC<InventoryProps> = ({
                    >
                        Close
                    </button>
+                           </>
+                       );
+                   })()}
                </div>
            </div>
        )}
@@ -2460,7 +3749,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                    <div className="flex justify-between items-center">
                                        <span className="text-slate-600">Active Batches</span>
                                        <span className="font-bold text-slate-900">
-                                           {selectedProductForDetails.batches?.filter(b => b.status === 'ACTIVE').length || 0}
+                                           {selectedProductForDetails.batches?.filter((b: DrugBatch) => b.status === 'ACTIVE').length || 0}
                                        </span>
                                    </div>
                                </div>
@@ -2552,7 +3841,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                            );
                                        }
 
-                                       const historyItems = [];
+                                       const historyItems: { type: string; date: string; description: string; details: string; icon: React.ComponentType<any>; color: string; }[] = [];
 
                                        // Add transfer history
                                        productTransfers.forEach(transfer => {
@@ -2570,7 +3859,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                        });
 
                                        // Add batch creation history (simulated)
-                                       selectedProductForDetails.batches?.forEach(batch => {
+                                       selectedProductForDetails.batches?.forEach((batch: DrugBatch) => {
                                            historyItems.push({
                                                type: 'stock_addition',
                                                date: batch.expiryDate, // Using expiry as approximate date
@@ -2851,7 +4140,7 @@ const Inventory: React.FC<InventoryProps> = ({
                                            }
                                        });
 
-                                       showSuccess("Price Updated", `Price for ${priceModalData.product.name} set to ${fmtCurrency(newPrice)} TZS`, 5000, true);
+                                       showSuccess("Price Updated", `Price for ${priceModalData.product.name} set to ${fmtCurrency(newPrice)} TZS`, 5000);
                                        setShowPriceModal(false);
                                        setPriceModalData(null);
                                    } catch (error) {
@@ -2943,12 +4232,12 @@ const Inventory: React.FC<InventoryProps> = ({
                                            await onUpdateProduct(updatedProduct);
                                        } else {
                                            // Fallback to local update if no callback provided
-                                           setProducts(prev => prev.map(p =>
+                                           setProducts((prev: Product[]) => prev.map(p =>
                                                p.id === editModalData.product.id
                                                    ? updatedProduct
                                                    : p
                                            ));
-                                           showSuccess("Product Name Updated", `Changed to: ${newName}`, 5000, true);
+                                           showSuccess("Product Name Updated", `Changed to: ${newName}`, 5000);
                                        }
                                        setShowEditNameModal(false);
                                        setEditModalData(null);
@@ -3035,12 +4324,12 @@ const Inventory: React.FC<InventoryProps> = ({
                                            await onUpdateProduct(updatedProduct);
                                        } else {
                                            // Fallback to local update if no callback provided
-                                           setProducts(prev => prev.map(p =>
+                                           setProducts((prev: Product[]) => prev.map(p =>
                                                p.id === editModalData.product.id
                                                    ? updatedProduct
                                                    : p
                                            ));
-                                           showSuccess("Generic Name Updated", newGeneric ? `Changed to: ${newGeneric}` : "Generic name removed", 5000, true);
+                                           showSuccess("Generic Name Updated", newGeneric ? `Changed to: ${newGeneric}` : "Generic name removed", 5000);
                                        }
                                        setShowEditGenericModal(false);
                                        setEditModalData(null);
@@ -3173,12 +4462,12 @@ const Inventory: React.FC<InventoryProps> = ({
                                        } else {
                                            console.log('Edit Cost Price: Using fallback local update');
                                            // Fallback to local update if no callback provided
-                                           setProducts(prev => prev.map(p =>
+                                           setProducts((prev: Product[]) => prev.map(p =>
                                                p.id === editModalData.product.id
                                                    ? updatedProduct
                                                    : p
                                            ));
-                                           showSuccess("Cost Price Updated", `Changed to: ${fmtCurrency(newCost)} TZS`, 5000, true);
+                                           showSuccess("Cost Price Updated", `Changed to: ${fmtCurrency(newCost)} TZS`, 5000);
                                        }
                                        setShowEditCostModal(false);
                                        setEditModalData(null);
@@ -3320,12 +4609,12 @@ const Inventory: React.FC<InventoryProps> = ({
                                        } else {
                                            console.log('Edit Min Stock: Using fallback local update');
                                            // Fallback to local update if no callback provided
-                                           setProducts(prev => prev.map(p =>
+                                           setProducts((prev: Product[]) => prev.map(p =>
                                                p.id === editModalData.product.id
                                                    ? updatedProduct
                                                    : p
                                            ));
-                                           showSuccess("Min Stock Updated", `Minimum stock for ${editModalData.product.name} set to ${newMinStock} units`, 5000, true);
+                                           showSuccess("Min Stock Updated", `Minimum stock for ${editModalData.product.name} set to ${newMinStock} units`, 5000);
                                        }
                                        setShowEditMinStockModal(false);
                                        setEditModalData(null);
@@ -3345,8 +4634,81 @@ const Inventory: React.FC<InventoryProps> = ({
            </div>
        )}
 
+       {showRestockInvoicesModal && (
+         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+           <div className="bg-white rounded-2xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
+             <div className="flex items-center justify-between p-4 border-b border-slate-200">
+               <h3 className="text-lg font-bold text-slate-900">Restock Invoices</h3>
+               <button
+                 onClick={() => setShowRestockInvoicesModal(false)}
+                 className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg"
+               >
+                 <X size={20} />
+               </button>
+             </div>
+
+             <div className="p-4 overflow-auto">
+               {isLoadingRestockInvoices ? (
+                 <p className="text-sm text-slate-500">Loading restock invoices...</p>
+               ) : restockInvoices.length === 0 ? (
+                 <p className="text-sm text-slate-500">No restock invoices found.</p>
+               ) : (
+                 <table className="w-full text-left">
+                   <thead className="bg-slate-50 border-b border-slate-200">
+                     <tr>
+                       <th className="px-3 py-2 text-xs font-semibold text-slate-500 uppercase">Invoice</th>
+                       <th className="px-3 py-2 text-xs font-semibold text-slate-500 uppercase">Customer/Supplier</th>
+                       <th className="px-3 py-2 text-xs font-semibold text-slate-500 uppercase">Amount</th>
+                       <th className="px-3 py-2 text-xs font-semibold text-slate-500 uppercase">Date</th>
+                       <th className="px-3 py-2 text-xs font-semibold text-slate-500 uppercase">Actions</th>
+                     </tr>
+                   </thead>
+                   <tbody className="divide-y divide-slate-100">
+                     {restockInvoices.map((inv) => (
+                       <tr key={inv.id} className="hover:bg-slate-50">
+                         <td className="px-3 py-3">
+                           <p className="font-semibold text-slate-900">{inv.id}</p>
+                           <p className="text-xs text-slate-500">{inv.status}</p>
+                         </td>
+                         <td className="px-3 py-3 text-sm text-slate-700">{inv.customerName || 'Inventory Restock'}</td>
+                         <td className="px-3 py-3 font-semibold text-slate-900">{fmtCurrency(inv.totalAmount)} TZS</td>
+                         <td className="px-3 py-3 text-sm text-slate-600">{inv.dateIssued ? new Date(inv.dateIssued).toLocaleString() : 'N/A'}</td>
+                         <td className="px-3 py-3">
+                           <div className="flex items-center gap-2">
+                             <button
+                               onClick={() => handleViewRestockInvoice(inv.id)}
+                               className="px-2.5 py-1.5 text-xs font-semibold rounded-md bg-blue-50 text-blue-700 hover:bg-blue-100 flex items-center gap-1"
+                             >
+                               <Eye size={14} /> View
+                             </button>
+                             <button
+                               onClick={() => handleDownloadRestockInvoice(inv.id)}
+                               className="px-2.5 py-1.5 text-xs font-semibold rounded-md bg-emerald-50 text-emerald-700 hover:bg-emerald-100 flex items-center gap-1"
+                             >
+                               <Download size={14} /> Download
+                             </button>
+                             <button
+                               onClick={() => handleShareRestockInvoice(inv.id)}
+                               className="px-2.5 py-1.5 text-xs font-semibold rounded-md bg-violet-50 text-violet-700 hover:bg-violet-100 flex items-center gap-1"
+                             >
+                               <Share2 size={14} /> Share
+                             </button>
+                           </div>
+                         </td>
+                       </tr>
+                     ))}
+                   </tbody>
+                 </table>
+               )}
+             </div>
+           </div>
+         </div>
+       )}
+
      </div>
    );
 };
 
 export default Inventory;
+
+

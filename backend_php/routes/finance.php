@@ -1,8 +1,30 @@
 <?php
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../utils/auth.php';
+require_once __DIR__ . '/../invoice_template.php';
 
 global $pdo;
+
+function invoicesHasColumn(string $columnName): bool {
+    global $pdo;
+    static $columnCache = [];
+
+    if (array_key_exists($columnName, $columnCache)) {
+        return $columnCache[$columnName];
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT COUNT(*) AS c
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'invoices'
+          AND COLUMN_NAME = ?
+    ");
+    $stmt->execute([$columnName]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    $columnCache[$columnName] = ((int)($row['c'] ?? 0) > 0);
+    return $columnCache[$columnName];
+}
 
 $method = $_SERVER['REQUEST_METHOD'];
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
@@ -13,16 +35,21 @@ $path = str_replace('/finance', '', $path);
 // Parse path parameters
 $id = null;
 $action = null;
+$resource = null;
 
-if (preg_match('/\/([^\/]+)\/([^\/]+)/', $path, $matches)) {
+if (preg_match('#^/([^/]+)/([^/]+)/([^/]+)$#', $path, $matches)) {
     // /resource/id/action
     $resource = $matches[1];
     $id = $matches[2];
-    $action = isset($matches[3]) ? $matches[3] : null;
-} elseif (preg_match('/\/([^\/]+)/', $path, $matches)) {
-    // /resource or /resource/id
+    $action = $matches[3];
+} elseif (preg_match('#^/([^/]+)/([^/]+)$#', $path, $matches)) {
+    // /resource/id
     $resource = $matches[1];
-    if ($resource === 'invoices' || $resource === 'expenses' || $resource === 'payments' || $resource === 'summary') {
+    $id = $matches[2];
+} elseif (preg_match('#^/([^/]+)$#', $path, $matches)) {
+    // /resource
+    $resource = $matches[1];
+    if (in_array($resource, ['invoices', 'expenses', 'payments', 'summary'], true)) {
         $action = $resource;
         $resource = null;
     }
@@ -69,15 +96,29 @@ function getInvoices() {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'DISPENSER', 'PHARMACIST', 'STOREKEEPER', 'INVENTORY_CONTROLLER', 'AUDITOR']);
-        $stmt = $pdo->query('
+        $user = authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'DISPENSER', 'PHARMACIST', 'STOREKEEPER', 'INVENTORY_CONTROLLER', 'AUDITOR']);
+        $roleKey = strtoupper((string)($user['role'] ?? ''));
+        $isSuperAdmin = $roleKey === 'SUPER_ADMIN';
+        $isAuditor = $roleKey === 'AUDITOR';
+        $query = '
             SELECT i.*, b.name as branch_name, cb.name as customer_branch_name, e.name as customer_entity_name
             FROM invoices i
             LEFT JOIN branches b ON i.branch_id = b.id
             LEFT JOIN branches cb ON i.customer_name = cb.id
             LEFT JOIN entities e ON i.customer_name = e.id
-            ORDER BY i.created_at DESC
-        ');
+        ';
+        $params = [];
+
+        // Branch users must only see invoices for their own branch.
+        // This ensures shipping branch sees its INV-SHIP-* and receiving branch sees its INV-RECV-*.
+        if (!$isSuperAdmin && !$isAuditor) {
+            $query .= ' WHERE i.branch_id = ?';
+            $params[] = $user['branch_id'] ?? '';
+        }
+
+        $query .= ' ORDER BY i.created_at DESC';
+        $stmt = $pdo->prepare($query);
+        $stmt->execute($params);
         $invoices = $stmt->fetchAll();
 
         $result = array_map(function($i) use ($pdo) {
@@ -115,6 +156,7 @@ function getInvoices() {
             'status' => $i['status'],
             'description' => $i['description'] ?? '',
             'source' => $i['source'],
+            'createdBy' => $i['created_by'] ?? null,
             'archived' => (bool)$i['archived'],
             'items' => json_decode($i['items'], true) ?? [],
             'payments' => $payments
@@ -179,6 +221,7 @@ function createInvoice() {
         $description = $input['description'] ?? '';
         $source = $input['source'] ?? 'MANUAL';
         $items = $input['items'] ?? [];
+        $createdBy = $input['createdBy'] ?? ($user['id'] ?? null);
 
         // Generate invoice ID if not provided
         if (empty($id)) {
@@ -232,7 +275,6 @@ function createInvoice() {
             return;
         }
 
-        $stmt = $pdo->prepare('INSERT INTO invoices (id, branch_id, customer_name, customer_phone, total_amount, paid_amount, status, due_date, description, source, items, created_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, NOW())');
         $itemsJson = json_encode($items);
         if ($itemsJson === false) {
             error_log('json_encode failed for items: ' . json_encode($items));
@@ -241,8 +283,14 @@ function createInvoice() {
             return;
         }
         error_log("Items JSON length: " . strlen($itemsJson));
-
-        $result = $stmt->execute([$id, $branchId, $customerName, $customerPhone, $totalAmount, 'UNPAID', $dueDate, $description, $source, $itemsJson]);
+        $hasCreatedByColumn = invoicesHasColumn('created_by');
+        if ($hasCreatedByColumn) {
+            $stmt = $pdo->prepare('INSERT INTO invoices (id, branch_id, customer_name, customer_phone, total_amount, paid_amount, status, due_date, description, source, items, created_by, created_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, NOW())');
+            $result = $stmt->execute([$id, $branchId, $customerName, $customerPhone, $totalAmount, 'UNPAID', $dueDate, $description, $source, $itemsJson, $createdBy]);
+        } else {
+            $stmt = $pdo->prepare('INSERT INTO invoices (id, branch_id, customer_name, customer_phone, total_amount, paid_amount, status, due_date, description, source, items, created_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, NOW())');
+            $result = $stmt->execute([$id, $branchId, $customerName, $customerPhone, $totalAmount, 'UNPAID', $dueDate, $description, $source, $itemsJson]);
+        }
 
         if (!$result) {
             $errorInfo = $stmt->errorInfo();
@@ -300,6 +348,7 @@ function createInvoice() {
             'status' => $createdInvoice['status'],
             'description' => $createdInvoice['description'],
             'source' => $createdInvoice['source'],
+            'createdBy' => $createdInvoice['created_by'] ?? null,
             'archived' => (bool)$createdInvoice['archived'],
             'items' => json_decode($createdInvoice['items'], true) ?? [],
             'payments' => $payments
@@ -601,7 +650,7 @@ function getFinancialSummary() {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'AUDITOR']);
 
         $branchId = $_GET['branchId'] ?? null;
         $startDate = $_GET['startDate'] ?? null;
@@ -661,7 +710,7 @@ function generateInvoiceHTML($invoiceId) {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'STOREKEEPER', 'AUDITOR']);
 
         $template = new InvoiceTemplate($pdo);
         $html = $template->generateInvoice($invoiceId);
@@ -679,7 +728,7 @@ function generateInvoicePDF($invoiceId) {
     global $pdo;
 
     try {
-        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT']);
+        authorizeRoles(['SUPER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_CONTROLLER', 'STOREKEEPER', 'AUDITOR']);
 
         $template = new InvoiceTemplate($pdo);
         $html = $template->generatePDF($invoiceId);
