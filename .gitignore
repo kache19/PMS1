@@ -9,10 +9,6 @@ frontend/dist/
 dist/
 build/
 
-# Build artifacts copied to web root
-assets/*.js
-assets/*.css
-
 # Logs and runtime files
 *.log
 error_log
